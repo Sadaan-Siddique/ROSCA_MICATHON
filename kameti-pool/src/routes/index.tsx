@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   Wallet,
@@ -16,10 +16,6 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import {
-  COMMITTEES,
-  WALLET_BALANCE,
-  PENDING_CONTRIBUTIONS,
-  NEXT_PAYOUT,
   formatPKR,
 } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
@@ -37,7 +33,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SafepayDrawer } from "@/components/SafepayDrawer";
-import { useCurrentUser } from "@/hooks/use-current-user";
+import { useBackendUser } from "@/hooks/use-backend-user";
+import { api } from "@/lib/api";
+import type { ApiContribution, ApiDashboardResponse, ApiPayout, UiCommitteeCard } from "@/lib/api-types";
+import { parseMoney } from "@/lib/api-types";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -57,31 +56,115 @@ function DashboardPage() {
   const [showBalance, setShowBalance] = useState(true);
   const [joinCode, setJoinCode] = useState("");
   const [joinOpen, setJoinOpen] = useState(false);
-  const [paidIds, setPaidIds] = useState<string[]>([]);
-  const [activePay, setActivePay] = useState<(typeof PENDING_CONTRIBUTIONS)[number] | null>(null);
+  const [committees, setCommittees] = useState<UiCommitteeCard[]>([]);
+  const [pendingContributions, setPendingContributions] = useState<ApiContribution[]>([]);
+  const [nextPayout, setNextPayout] = useState<ApiPayout | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [activePay, setActivePay] = useState<ApiContribution | null>(null);
   const navigate = useNavigate();
-  useCurrentUser(); // re-render on user switch
+  const { backendUser } = useBackendUser();
 
-  const pending = PENDING_CONTRIBUTIONS.filter((p) => !paidIds.includes(p.committeeId));
+  useEffect(() => {
+    if (!backendUser?.id) return;
+    setLoading(true);
 
-  const handleJoin = () => {
+    Promise.all([
+      api.get<ApiDashboardResponse>(`/dashboard/${backendUser.id}`),
+      api.get<ApiContribution[]>(`/dashboard/${backendUser.id}/pending-contributions`)
+    ])
+      .then(async ([dashboardResponse, pendingResponse]) => {
+        const baseCommittees = dashboardResponse.data.committees.map((membership) => ({
+          id: membership.committee.id,
+          name: membership.committee.name,
+          contributionAmount: parseMoney(membership.committee.contributionAmount),
+          cycleLength: membership.committee.cycleLength,
+          currentCycle: 1,
+          totalMembers: 0,
+          frequency: membership.committee.frequency,
+          payoutType: membership.committee.payoutType,
+          startDate: membership.committee.startDate,
+          inviteCode: membership.committee.inviteCode,
+          adminId: membership.committee.adminId
+        }));
+
+        const committeeWithCycles = await Promise.all(
+          baseCommittees.map(async (committee) => {
+            const [cycleResponse, membersResponse] = await Promise.all([
+              api.get<{ currentCycle: number }>(`/committees/${committee.id}/current-cycle`),
+              api.get<Array<{ id: string }>>(`/committees/${committee.id}/members`)
+            ]);
+            return {
+              ...committee,
+              currentCycle: cycleResponse.data.currentCycle ?? 1,
+              totalMembers: membersResponse.data.length
+            };
+          })
+        );
+
+        setCommittees(committeeWithCycles);
+        setPendingContributions(pendingResponse.data);
+        setNextPayout(dashboardResponse.data.nextPayout);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  }, [backendUser?.id]);
+
+  const walletBalance = useMemo(
+    () =>
+      pendingContributions.reduce((sum, contribution) => {
+        const amount = parseMoney(contribution.committee.contributionAmount);
+        return sum + amount;
+      }, 0),
+    [pendingContributions]
+  );
+
+  const handleJoin = async () => {
     if (!joinCode.trim()) {
       toast.error("Please enter an invite code");
       return;
     }
-    toast.success("Joined committee", {
-      description: `Welcome aboard! You've joined with code ${joinCode.toUpperCase()}.`,
-    });
-    setJoinCode("");
-    setJoinOpen(false);
+
+    if (!backendUser?.id) {
+      toast.error("User is not ready yet, please retry in a moment");
+      return;
+    }
+
+    try {
+      const committeeResponse = await api.get<{ id: string; inviteCode: string }>(
+        `/committees/by-invite/${joinCode.toUpperCase()}`
+      );
+      await api.post(`/committees/${committeeResponse.data.id}/join`, {
+        userId: backendUser.id,
+        inviteCode: committeeResponse.data.inviteCode
+      });
+      toast.success("Joined committee successfully");
+      setJoinCode("");
+      setJoinOpen(false);
+    } catch {
+      // handled by interceptor
+    }
   };
 
-  const handlePaid = (committeeId: string) => {
-    setPaidIds((ids) => [...ids, committeeId]);
-    setActivePay(null);
+  const handlePaid = async (contributionId: string) => {
+    try {
+      await api.patch(`/contributions/${contributionId}/pay`);
+      setPendingContributions((prev) => prev.filter((item) => item.id !== contributionId));
+      setActivePay(null);
+      toast.success("Payment marked successfully");
+    } catch {
+      // handled by interceptor
+    }
   };
 
   const isOverdue = (dueDate: string) => new Date(dueDate).getTime() < Date.now();
+
+  const pending = pendingContributions;
+  const nextPayoutCommittee = committees.find((committee) => committee.id === nextPayout?.committeeId);
+  const nextPayoutAmount = nextPayoutCommittee
+    ? nextPayoutCommittee.contributionAmount * nextPayoutCommittee.cycleLength
+    : 0;
+  const nextPayoutDate = nextPayout?.createdAt ?? new Date().toISOString();
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">
@@ -96,7 +179,7 @@ function DashboardPage() {
             <p className="mt-4 text-sm text-muted-foreground">Available balance</p>
             <div className="mt-2 flex items-center gap-3">
               <h1 className="tabular text-4xl font-bold tracking-tight sm:text-6xl">
-                {showBalance ? formatPKR(WALLET_BALANCE) : "PKR ••••••"}
+                {showBalance ? formatPKR(walletBalance) : "PKR ••••••"}
               </h1>
               <button
                 onClick={() => setShowBalance((v) => !v)}
@@ -176,12 +259,12 @@ function DashboardPage() {
               const overdue = isOverdue(p.dueDate);
               return (
                 <div
-                  key={p.committeeId}
+                  key={p.id}
                   className="flex flex-col gap-3 rounded-xl border border-warning/20 bg-card/60 p-4 sm:flex-row sm:items-center sm:justify-between"
                 >
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <p className="font-semibold text-foreground">{p.committeeName}</p>
+                      <p className="font-semibold text-foreground">{p.committee.name}</p>
                       {overdue && (
                         <span className="rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-destructive">
                           Overdue
@@ -194,7 +277,7 @@ function DashboardPage() {
                   </div>
                   <div className="flex items-center justify-between gap-4 sm:gap-6">
                     <span className="tabular text-lg font-bold text-foreground">
-                      {formatPKR(p.amount)}
+                      {formatPKR(parseMoney(p.committee.contributionAmount))}
                     </span>
                     <Button
                       size="sm"
@@ -215,14 +298,15 @@ function DashboardPage() {
         <SafepayDrawer
           open={!!activePay}
           onOpenChange={(o) => !o && setActivePay(null)}
-          amount={activePay.amount}
-          committeeName={activePay.committeeName}
+          amount={parseMoney(activePay.committee.contributionAmount)}
+          committeeName={activePay.committee.name}
           cycleNumber={activePay.cycleNumber}
-          onComplete={() => handlePaid(activePay.committeeId)}
+          onComplete={() => handlePaid(activePay.id)}
         />
       )}
 
       {/* Next Payout Banner */}
+      {nextPayout ? (
       <section className="mt-6 overflow-hidden rounded-2xl border border-primary/30 bg-gradient-to-br from-primary/15 via-card to-card p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -231,14 +315,14 @@ function DashboardPage() {
               Next Payout
             </div>
             <p className="mt-3 text-sm text-muted-foreground">
-              You're receiving from <span className="font-semibold text-foreground">{NEXT_PAYOUT.committeeName}</span>
+              You're receiving from <span className="font-semibold text-foreground">{nextPayoutCommittee?.name ?? "Your committee"}</span>
             </p>
             <h3 className="tabular mt-1 text-3xl font-bold sm:text-4xl">
-              {formatPKR(NEXT_PAYOUT.amount)}
+              {formatPKR(nextPayoutAmount)}
             </h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              Cycle #{NEXT_PAYOUT.cycleNumber} · Expected{" "}
-              {new Date(NEXT_PAYOUT.expectedDate).toLocaleDateString("en-PK", {
+              Cycle #{nextPayout.cycleNumber} · Expected{" "}
+              {new Date(nextPayoutDate).toLocaleDateString("en-PK", {
                 day: "numeric",
                 month: "long",
                 year: "numeric",
@@ -248,13 +332,14 @@ function DashboardPage() {
           <Button
             variant="outline"
             className="border-primary/40 bg-card/40"
-            onClick={() => navigate({ to: "/committees/$committeeId", params: { committeeId: NEXT_PAYOUT.committeeId } })}
+            onClick={() => navigate({ to: "/committees/$committeeId", params: { committeeId: nextPayout.committeeId } })}
           >
             View Committee
             <ArrowRight className="h-4 w-4" />
           </Button>
         </div>
       </section>
+      ) : null}
 
       {/* Active Kametis */}
       <section className="mt-10">
@@ -262,16 +347,20 @@ function DashboardPage() {
           <div>
             <h2 className="text-xl font-bold tracking-tight">Active Kametis</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              {COMMITTEES.length} committee{COMMITTEES.length === 1 ? "" : "s"} in progress
+              {committees.length} committee{committees.length === 1 ? "" : "s"} in progress
             </p>
           </div>
         </div>
 
-        {COMMITTEES.length === 0 ? (
+        {loading ? (
+          <Card className="mt-5 border-dashed bg-card/40">
+            <CardContent className="px-6 py-10 text-center text-sm text-muted-foreground">Loading committees...</CardContent>
+          </Card>
+        ) : committees.length === 0 ? (
           <EmptyState />
         ) : (
           <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {COMMITTEES.map((c) => {
+            {committees.map((c) => {
               const progress = (c.currentCycle / c.cycleLength) * 100;
               const totalPool = c.contributionAmount * c.cycleLength;
               return (

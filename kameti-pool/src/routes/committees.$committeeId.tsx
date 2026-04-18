@@ -1,5 +1,5 @@
-import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   ArrowLeft,
@@ -19,50 +19,91 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { COMMITTEES, formatPKR, getCommittee, type Committee } from "@/lib/mock-data";
-import { useCurrentUser } from "@/hooks/use-current-user";
+import { formatPKR } from "@/lib/mock-data";
+import { useBackendUser } from "@/hooks/use-backend-user";
 import { PayoutFlowDialog } from "@/components/PayoutFlowDialog";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
+import type { ApiCommitteeDetail, ApiDashboardResponse } from "@/lib/api-types";
+import { parseMoney } from "@/lib/api-types";
 
 export const Route = createFileRoute("/committees/$committeeId")({
-  loader: ({ params }): Committee => {
-    const c = getCommittee(params.committeeId);
-    if (!c) throw notFound();
-    return c;
-  },
-  head: ({ loaderData }) => ({
+  head: () => ({
     meta: [
-      { title: `${loaderData?.name ?? "Committee"} — Kameti` },
-      { name: "description", content: `Manage ${loaderData?.name ?? "your committee"} on Kameti.` },
+      { title: "Committee — Kameti" },
+      { name: "description", content: "Manage your committee on Kameti." },
     ],
   }),
   component: CommitteeDetailsPage,
-  notFoundComponent: () => (
-    <div className="mx-auto max-w-2xl px-4 py-20 text-center">
-      <h1 className="text-2xl font-bold">Committee not found</h1>
-      <Link to="/" className="mt-4 inline-block text-primary hover:underline">
-        Back to Dashboard
-      </Link>
-    </div>
-  ),
 });
 
+function avatarFromName(name: string) {
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = name.charCodeAt(index) + ((hash << 5) - hash);
+  }
+  return `hsl(${Math.abs(hash) % 360} 60% 45%)`;
+}
+
 function CommitteeDetailsPage() {
-  const committee = Route.useLoaderData() as Committee;
+  const { committeeId } = Route.useParams();
   const router = useRouter();
-  const currentUser = useCurrentUser();
+  const { backendUser, loading: userLoading } = useBackendUser();
   const [copied, setCopied] = useState(false);
   const [payoutOpen, setPayoutOpen] = useState(false);
   const [payoutMember, setPayoutMember] = useState<string>("");
+  const [committee, setCommittee] = useState<ApiCommitteeDetail | null>(null);
+  const [siblingCommittees, setSiblingCommittees] = useState<Array<{ id: string; name: string }>>([]);
+  const [currentCycle, setCurrentCycle] = useState(1);
+  const [loading, setLoading] = useState(true);
 
-  if (!committee) return null;
+  useEffect(() => {
+    if (!committeeId || !backendUser?.id) return;
+    setLoading(true);
+    Promise.all([
+      api.get<ApiCommitteeDetail>(`/committees/${committeeId}`),
+      api.get<{ currentCycle: number }>(`/committees/${committeeId}/current-cycle`),
+      api.get<ApiDashboardResponse>(`/dashboard/${backendUser.id}`)
+    ])
+      .then(([committeeResponse, cycleResponse, dashboardResponse]) => {
+        setCommittee(committeeResponse.data);
+        setCurrentCycle(cycleResponse.data.currentCycle);
+        const siblings = dashboardResponse.data.committees
+          .map((membership) => membership.committee)
+          .filter((item) => item.id !== committeeId)
+          .map((item) => ({ id: item.id, name: item.name }));
+        setSiblingCommittees(siblings);
+      })
+      .finally(() => setLoading(false));
+  }, [committeeId, backendUser?.id]);
 
-  const totalPool = committee.contributionAmount * committee.cycleLength;
+  if (loading || userLoading) {
+    return <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10 text-sm text-muted-foreground">Loading committee...</div>;
+  }
+
+  if (!committee || !backendUser) {
+    return (
+      <div className="mx-auto max-w-2xl px-4 py-20 text-center">
+        <h1 className="text-2xl font-bold">Committee not found</h1>
+        <Link to="/" className="mt-4 inline-block text-primary hover:underline">
+          Back to Dashboard
+        </Link>
+      </div>
+    );
+  }
+
+  const contributionAmount = parseMoney(committee.contributionAmount);
+  const totalMembers = committee.members.length;
+  const totalPool = contributionAmount * committee.cycleLength;
   const platformFee = totalPool * 0.01;
   const netPayout = totalPool - platformFee;
-  const progress = (committee.currentCycle / committee.cycleLength) * 100;
-  const currentRecipient = committee.members.find((m) => m.payoutOrder === committee.currentCycle);
-  const isAdmin = committee.adminId === currentUser.id || currentUser.role === "ADMIN";
+  const progress = (currentCycle / committee.cycleLength) * 100;
+  const currentRecipient = useMemo(() => {
+    const byOrder = committee.members.find((member) => member.payoutOrder === currentCycle);
+    if (byOrder) return byOrder;
+    return committee.members.find((member) => member.userId === committee.payouts?.[0]?.recipientId);
+  }, [committee.members, committee.payouts, currentCycle]);
+  const isAdmin = committee.adminId === backendUser.id;
 
   const copyInvite = () => {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
@@ -76,25 +117,33 @@ function CommitteeDetailsPage() {
   };
 
   const handleGenerateCycle = () => {
-    toast.success(`Cycle ${committee.currentCycle + 1} generated`, {
-      description: `${committee.totalMembers} contribution requests sent · ${formatPKR(committee.contributionAmount)} due per member`,
-    });
-    setTimeout(() => {
-      toast("10% Safepay Advance Secured", {
-        description: `${formatPKR(committee.contributionAmount * 0.1)} held in vault from each member`,
+    const nextCycle = currentCycle + 1;
+    api
+      .post(`/committees/${committee.id}/cycles/${nextCycle}/contributions/generate`)
+      .then(() => {
+        toast.success(`Cycle ${nextCycle} generated`, {
+          description: `${totalMembers} contribution requests sent · ${formatPKR(contributionAmount)} due per member`,
+        });
       });
-    }, 700);
   };
 
   const handleAssignPayout = () => {
-    const next = committee.members.find((m) => !m.hasReceivedPayout);
-    setPayoutMember(next?.user.name ?? "next member");
-    setPayoutOpen(true);
-    setTimeout(() => {
-      toast.success(`Payout verified for Cycle ${committee.currentCycle}`, {
-        description: `${formatPKR(netPayout)} routed to ${next?.user.name ?? "member"} · 1% fee deducted`,
+    api
+      .post(`/committees/${committee.id}/cycles/${currentCycle}/payouts/assign`)
+      .then(async () => {
+        const [updatedCommittee, updatedCycle] = await Promise.all([
+          api.get<ApiCommitteeDetail>(`/committees/${committee.id}`),
+          api.get<{ currentCycle: number }>(`/committees/${committee.id}/current-cycle`)
+        ]);
+        setCommittee(updatedCommittee.data);
+        setCurrentCycle(updatedCycle.data.currentCycle);
+        const next = updatedCommittee.data.members.find((member) => !member.hasReceivedPayout);
+        setPayoutMember(next?.user.name ?? "next member");
+        setPayoutOpen(true);
+        toast.success(`Payout verified for Cycle ${currentCycle}`, {
+          description: `${formatPKR(netPayout)} routed to ${next?.user.name ?? "member"} · 1% fee deducted`,
+        });
       });
-    }, 3500);
   };
 
   return (
@@ -154,8 +203,8 @@ function CommitteeDetailsPage() {
 
       {/* Stats */}
       <section className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard label="Per member" value={formatPKR(committee.contributionAmount)} icon={<CircleDollarSign className="h-4 w-4" />} />
-        <StatCard label="Members" value={String(committee.totalMembers)} icon={<Users className="h-4 w-4" />} />
+        <StatCard label="Per member" value={formatPKR(contributionAmount)} icon={<CircleDollarSign className="h-4 w-4" />} />
+        <StatCard label="Members" value={String(totalMembers)} icon={<Users className="h-4 w-4" />} />
         <StatCard label="Frequency" value={committee.frequency === "WEEKLY" ? "Weekly" : "Monthly"} icon={<Repeat className="h-4 w-4" />} />
         <StatCard label="Started" value={new Date(committee.startDate).toLocaleDateString("en-PK", { month: "short", year: "numeric" })} icon={<Calendar className="h-4 w-4" />} />
       </section>
@@ -166,7 +215,7 @@ function CommitteeDetailsPage() {
           <div>
             <p className="text-xs font-semibold uppercase tracking-widest text-primary">Current Cycle</p>
             <div className="tabular mt-1 flex items-baseline gap-2">
-              <span className="text-5xl font-bold">{committee.currentCycle}</span>
+              <span className="text-5xl font-bold">{currentCycle}</span>
               <span className="text-base text-muted-foreground">/ {committee.cycleLength}</span>
             </div>
             <p className="mt-2 text-sm text-muted-foreground">
@@ -204,9 +253,10 @@ function CommitteeDetailsPage() {
           <div className="divide-y divide-border/60">
             {committee.members
               .slice()
-              .sort((a, b) => a.payoutOrder - b.payoutOrder)
+              .sort((a, b) => (a.payoutOrder ?? 999) - (b.payoutOrder ?? 999))
               .map((m) => {
-                const isCurrent = m.payoutOrder === committee.currentCycle;
+                const safeOrder = m.payoutOrder ?? 0;
+                const isCurrent = safeOrder === currentCycle;
                 return (
                   <div
                     key={m.id}
@@ -217,7 +267,7 @@ function CommitteeDetailsPage() {
                   >
                     <div
                       className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold text-primary-foreground"
-                      style={{ background: m.user.avatarColor }}
+                      style={{ background: avatarFromName(m.user.name) }}
                     >
                       {m.user.name
                         .split(" ")
@@ -228,14 +278,14 @@ function CommitteeDetailsPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <p className="truncate font-semibold">{m.user.name}</p>
-                        {m.user.id === currentUser.id && (
+                        {m.user.id === backendUser.id && (
                           <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                             You
                           </span>
                         )}
                       </div>
                       <p className="mt-0.5 text-xs text-muted-foreground">
-                        Payout order · <span className="tabular font-semibold text-foreground">#{m.payoutOrder}</span>
+                        Payout order · <span className="tabular font-semibold text-foreground">#{safeOrder}</span>
                       </p>
                     </div>
                     <div>
@@ -297,7 +347,7 @@ function CommitteeDetailsPage() {
             <div className="ml-1 flex flex-col items-start leading-tight">
               <span className="text-sm font-bold">Generate Next Cycle</span>
               <span className="text-[11px] font-normal text-muted-foreground">
-                POST /cycles/{committee.currentCycle + 1}/contributions/generate
+                POST /cycles/{currentCycle + 1}/contributions/generate
               </span>
             </div>
           </Button>
@@ -314,7 +364,7 @@ function CommitteeDetailsPage() {
             <div className="ml-1 flex flex-col items-start leading-tight">
               <span className="text-sm font-bold">Process Month / Assign Payout</span>
               <span className="text-[11px] font-normal text-primary-foreground/80">
-                POST /cycles/{committee.currentCycle}/payouts/assign
+                POST /cycles/{currentCycle}/payouts/assign
               </span>
             </div>
           </Button>
@@ -328,15 +378,15 @@ function CommitteeDetailsPage() {
         totalPool={totalPool}
         platformFee={platformFee}
         netPayout={netPayout}
-        totalMembers={committee.totalMembers}
+        totalMembers={totalMembers}
         recipientName={payoutMember}
-        cycleNumber={committee.currentCycle}
+        cycleNumber={currentCycle}
         committeeName={committee.name}
       />
 
       {/* Sibling committees nav */}
       <div className="mt-10 flex flex-wrap gap-2">
-        {COMMITTEES.filter((c) => c.id !== committee.id).map((c) => (
+        {siblingCommittees.map((c) => (
           <Link
             key={c.id}
             to="/committees/$committeeId"

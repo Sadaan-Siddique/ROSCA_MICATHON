@@ -20,6 +20,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Link } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import { formatPKR } from "@/lib/mock-data";
+import { useBackendUser } from "@/hooks/use-backend-user";
+import { api } from "@/lib/api";
 
 export const Route = createFileRoute("/create")({
   head: () => ({
@@ -36,6 +38,7 @@ type PayoutType = "FIXED" | "RANDOM";
 
 function CreatePage() {
   const navigate = useNavigate();
+  const { backendUser } = useBackendUser();
   const [name, setName] = useState("");
   const [amount, setAmount] = useState<number | "">("");
   const [members, setMembers] = useState<number | "">("");
@@ -49,16 +52,30 @@ function CreatePage() {
   const safepay = amt * 0.1;
   const platformFee = totalPool * 0.01;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !amt || !mem || !startDate) {
+    if (!name.trim() || !amt || !mem || !startDate || !backendUser?.id) {
       toast.error("Please complete all fields");
       return;
     }
-    toast.success("Kameti created", {
-      description: `${name} is live with ${mem} members.`,
-    });
-    setTimeout(() => navigate({ to: "/" }), 600);
+
+    try {
+      const response = await api.post("/committees", {
+        name,
+        contributionAmount: amt,
+        cycleLength: mem,
+        frequency,
+        adminId: backendUser.id,
+        startDate: startDate.toISOString(),
+        payoutType
+      });
+      toast.success("Kameti created", {
+        description: `${name} is live with ${mem} members.`,
+      });
+      navigate({ to: "/committees/$committeeId", params: { committeeId: response.data.id } });
+    } catch {
+      // handled by interceptor
+    }
   };
 
   return (

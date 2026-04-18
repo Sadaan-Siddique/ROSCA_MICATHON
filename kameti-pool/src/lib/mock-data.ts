@@ -4,7 +4,7 @@ export type PayoutType = "FIXED" | "RANDOM";
 export interface User {
   id: string;
   name: string;
-  avatarColor: string;
+  avatarColor?: string;
 }
 
 export interface CommitteeMember {
@@ -48,12 +48,13 @@ export interface NextPayout {
 export interface DemoUser extends User {
   role: "ADMIN" | "MEMBER";
   initials: string;
+  phone: string;
 }
 
 export const DEMO_USERS: DemoUser[] = [
-  { id: "u_1", name: "Admin Sadaan", initials: "AS", role: "ADMIN", avatarColor: "oklch(0.74 0.17 158)" },
-  { id: "u_4", name: "Member Ali", initials: "MA", role: "MEMBER", avatarColor: "oklch(0.62 0.22 25)" },
-  { id: "u_3", name: "Member Zara", initials: "MZ", role: "MEMBER", avatarColor: "oklch(0.78 0.16 78)" },
+  { id: "u_1", name: "Admin Sadaan", initials: "AS", role: "ADMIN", avatarColor: "oklch(0.74 0.17 158)", phone: "03001111111" },
+  { id: "u_4", name: "Member Ali", initials: "MA", role: "MEMBER", avatarColor: "oklch(0.62 0.22 25)", phone: "03002222222" },
+  { id: "u_3", name: "Member Zara", initials: "MZ", role: "MEMBER", avatarColor: "oklch(0.78 0.16 78)", phone: "03003333333" },
 ];
 
 // Simple global mutable current user with subscriber pattern (mock auth)

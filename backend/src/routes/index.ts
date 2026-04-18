@@ -5,31 +5,46 @@ import { Frequency, PayoutStatus, PayoutType, Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import { ApiError } from "../middlewares/errorHandler.js";
 import { notify } from "../services/notificationService.js";
+import { env } from "../config/env.js";
 
 export const router = Router();
 
-const otpRequestSchema = z.object({ phone: z.string().min(10) });
+const idSchema = z.string().trim().min(1).max(100);
+const committeeIdParamSchema = z.object({ committeeId: idSchema }).strict();
+const contributionIdParamSchema = z.object({ contributionId: idSchema }).strict();
+const userIdParamSchema = z.object({ userId: idSchema }).strict();
+const cycleParamSchema = z
+  .object({
+    committeeId: idSchema,
+    cycleNumber: z.coerce.number().int().positive()
+  })
+  .strict();
+
+const otpRequestSchema = z.object({ phone: z.string().trim().min(10).max(20) }).strict();
 const otpVerifySchema = z.object({
-  phone: z.string().min(10),
-  otp: z.string().length(4),
-  name: z.string().min(2)
-});
+  phone: z.string().trim().min(10).max(20),
+  otp: z.string().trim().length(4),
+  name: z.string().trim().min(2).max(80)
+}).strict();
 const createCommitteeSchema = z.object({
-  name: z.string().min(3),
+  name: z.string().trim().min(3).max(120),
   contributionAmount: z.number().positive(),
   cycleLength: z.number().int().positive(),
   frequency: z.enum(["WEEKLY", "MONTHLY"]),
-  adminId: z.string(),
+  adminId: idSchema,
   startDate: z.string().datetime(),
   payoutType: z.enum(["FIXED", "RANDOM"])
-});
+}).strict();
 const joinSchema = z.object({
-  userId: z.string(),
-  inviteCode: z.string().min(5)
-});
+  userId: idSchema,
+  inviteCode: z.string().trim().min(5).max(20)
+}).strict();
+const inviteCodeParamSchema = z.object({
+  inviteCode: z.string().trim().min(5).max(20)
+}).strict();
 const payoutOrderSchema = z.object({
-  members: z.array(z.object({ userId: z.string(), payoutOrder: z.number().int().positive() }))
-});
+  members: z.array(z.object({ userId: idSchema, payoutOrder: z.number().int().positive() }).strict()).min(1)
+}).strict();
 
 router.get("/health", (_req, res) => {
   res.json({ status: "ok" });
@@ -38,12 +53,12 @@ router.get("/health", (_req, res) => {
 router.post("/auth/request-otp", (req, res) => {
   const parsed = otpRequestSchema.parse(req.body);
   notify(`OTP requested for ${parsed.phone}`);
-  res.json({ message: `OTP sent on ${parsed.phone}`, otp: "1234" });
+  res.json({ message: `OTP sent on ${parsed.phone}`, otp: env.OTP_MOCK_CODE });
 });
 
 router.post("/auth/verify-otp", async (req, res) => {
   const parsed = otpVerifySchema.parse(req.body);
-  if (parsed.otp !== "1234") {
+  if (parsed.otp !== env.OTP_MOCK_CODE) {
     throw new ApiError(400, "Invalid OTP");
   }
 
@@ -83,11 +98,11 @@ router.post("/committees", async (req, res) => {
 });
 
 router.post("/committees/:committeeId/join", async (req, res) => {
-  const { committeeId } = req.params;
+  const { committeeId } = committeeIdParamSchema.parse(req.params);
   const parsed = joinSchema.parse(req.body);
   const committee = await prisma.committee.findUnique({ where: { id: committeeId } });
 
-  if (!committee || committee.inviteCode !== parsed.inviteCode) {
+  if (!committee || committee.inviteCode !== parsed.inviteCode.toUpperCase()) {
     throw new ApiError(404, "Committee not found or invite code invalid");
   }
 
@@ -106,8 +121,22 @@ router.post("/committees/:committeeId/join", async (req, res) => {
   res.status(201).json(member);
 });
 
+router.get("/committees/by-invite/:inviteCode", async (req, res) => {
+  const { inviteCode } = inviteCodeParamSchema.parse(req.params);
+  const committee = await prisma.committee.findUnique({
+    where: { inviteCode: inviteCode.toUpperCase() },
+    select: { id: true, name: true, inviteCode: true }
+  });
+
+  if (!committee) {
+    throw new ApiError(404, "Committee not found for this invite code");
+  }
+
+  res.json(committee);
+});
+
 router.get("/committees/:committeeId", async (req, res) => {
-  const { committeeId } = req.params;
+  const { committeeId } = committeeIdParamSchema.parse(req.params);
   const committee = await prisma.committee.findUnique({
     where: { id: committeeId },
     include: {
@@ -124,8 +153,9 @@ router.get("/committees/:committeeId", async (req, res) => {
 });
 
 router.get("/committees/:committeeId/members", async (req, res) => {
+  const { committeeId } = committeeIdParamSchema.parse(req.params);
   const members = await prisma.committeeMember.findMany({
-    where: { committeeId: req.params.committeeId },
+    where: { committeeId },
     include: { user: true },
     orderBy: { payoutOrder: "asc" }
   });
@@ -133,7 +163,7 @@ router.get("/committees/:committeeId/members", async (req, res) => {
 });
 
 router.patch("/committees/:committeeId/payout-order", async (req, res) => {
-  const { committeeId } = req.params;
+  const { committeeId } = committeeIdParamSchema.parse(req.params);
   const parsed = payoutOrderSchema.parse(req.body);
 
   await prisma.$transaction(
@@ -149,8 +179,7 @@ router.patch("/committees/:committeeId/payout-order", async (req, res) => {
 });
 
 router.post("/committees/:committeeId/cycles/:cycleNumber/contributions/generate", async (req, res) => {
-  const { committeeId, cycleNumber } = req.params;
-  const cycle = Number(cycleNumber);
+  const { committeeId, cycleNumber: cycle } = cycleParamSchema.parse(req.params);
   const committee = await prisma.committee.findUnique({
     where: { id: committeeId },
     include: { members: true }
@@ -190,8 +219,9 @@ router.post("/committees/:committeeId/cycles/:cycleNumber/contributions/generate
 });
 
 router.patch("/contributions/:contributionId/pay", async (req, res) => {
+  const { contributionId } = contributionIdParamSchema.parse(req.params);
   const contribution = await prisma.contribution.update({
-    where: { id: req.params.contributionId },
+    where: { id: contributionId },
     data: {
       paid: true,
       paidAt: new Date(),
@@ -204,8 +234,7 @@ router.patch("/contributions/:contributionId/pay", async (req, res) => {
 });
 
 router.post("/committees/:committeeId/cycles/:cycleNumber/payouts/assign", async (req, res) => {
-  const { committeeId, cycleNumber } = req.params;
-  const cycle = Number(cycleNumber);
+  const { committeeId, cycleNumber: cycle } = cycleParamSchema.parse(req.params);
   const committee = await prisma.committee.findUnique({
     where: { id: committeeId },
     include: { members: { orderBy: { payoutOrder: "asc" } } }
@@ -239,7 +268,7 @@ router.post("/committees/:committeeId/cycles/:cycleNumber/payouts/assign", async
 });
 
 router.get("/committees/:committeeId/current-cycle", async (req, res) => {
-  const { committeeId } = req.params;
+  const { committeeId } = committeeIdParamSchema.parse(req.params);
   const committee = await prisma.committee.findUnique({ where: { id: committeeId } });
   if (!committee) {
     throw new ApiError(404, "Committee not found");
@@ -257,7 +286,7 @@ router.get("/committees/:committeeId/current-cycle", async (req, res) => {
 });
 
 router.get("/dashboard/:userId", async (req, res) => {
-  const { userId } = req.params;
+  const { userId } = userIdParamSchema.parse(req.params);
   const memberships = await prisma.committeeMember.findMany({
     where: { userId },
     include: {
@@ -281,4 +310,17 @@ router.get("/dashboard/:userId", async (req, res) => {
     pendingContributions,
     nextPayout
   });
+});
+
+router.get("/dashboard/:userId/pending-contributions", async (req, res) => {
+  const { userId } = userIdParamSchema.parse(req.params);
+  const contributions = await prisma.contribution.findMany({
+    where: { userId, paid: false },
+    include: {
+      committee: true
+    },
+    orderBy: [{ isOverdue: "desc" }, { dueDate: "asc" }]
+  });
+
+  res.json(contributions);
 });
