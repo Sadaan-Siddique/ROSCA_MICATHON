@@ -1,0 +1,98 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Frequency {
+  WEEKLY
+  MONTHLY
+}
+
+enum PayoutType {
+  FIXED
+  RANDOM
+}
+
+enum PayoutStatus {
+  PENDING
+  PAID
+}
+
+model User {
+  id          String               @id @default(cuid())
+  name        String
+  phone       String               @unique
+  createdAt   DateTime             @default(now())
+  committees  Committee[]          @relation("CommitteeAdmin")
+  memberships CommitteeMember[]
+  contributions Contribution[]
+  payouts      Payout[]            @relation("PayoutRecipient")
+}
+
+model Committee {
+  id                 String            @id @default(cuid())
+  name               String
+  contributionAmount Decimal           @db.Decimal(10, 2)
+  cycleLength        Int
+  frequency          Frequency
+  adminId            String
+  startDate          DateTime
+  payoutType         PayoutType
+  inviteCode         String            @unique
+  createdAt          DateTime          @default(now())
+  admin              User              @relation("CommitteeAdmin", fields: [adminId], references: [id])
+  members            CommitteeMember[]
+  contributions      Contribution[]
+  payouts            Payout[]
+}
+
+model CommitteeMember {
+  id                String    @id @default(cuid())
+  userId            String
+  committeeId       String
+  payoutOrder       Int?
+  hasReceivedPayout Boolean   @default(false)
+  joinedAt          DateTime  @default(now())
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  committee         Committee @relation(fields: [committeeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, committeeId])
+  @@unique([committeeId, payoutOrder])
+}
+
+model Contribution {
+  id          String    @id @default(cuid())
+  userId      String
+  committeeId String
+  cycleNumber Int
+  paid        Boolean   @default(false)
+  paidAt      DateTime?
+  dueDate     DateTime
+  isOverdue   Boolean   @default(false)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  committee   Committee @relation(fields: [committeeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, committeeId, cycleNumber])
+}
+
+model Payout {
+  id          String       @id @default(cuid())
+  committeeId String
+  cycleNumber Int
+  recipientId String
+  status      PayoutStatus @default(PENDING)
+  paidAt      DateTime?
+  createdAt   DateTime     @default(now())
+  committee   Committee    @relation(fields: [committeeId], references: [id], onDelete: Cascade)
+  recipient   User         @relation("PayoutRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@unique([committeeId, cycleNumber])
+}
