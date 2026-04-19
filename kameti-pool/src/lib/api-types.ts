@@ -1,6 +1,14 @@
+/**
+ * Types aligned with backend Prisma models as returned by Express JSON.
+ * Prisma `Decimal` serializes as string in JSON.
+ */
+
 export type Frequency = "WEEKLY" | "MONTHLY";
 export type PayoutType = "FIXED" | "RANDOM";
 export type PayoutStatus = "PENDING" | "PAID";
+
+/** JSON-serialized Prisma.Decimal */
+export type DecimalString = string;
 
 export interface ApiUser {
   id: string;
@@ -12,13 +20,14 @@ export interface ApiUser {
 export interface ApiCommittee {
   id: string;
   name: string;
-  contributionAmount: string;
+  contributionAmount: DecimalString;
   cycleLength: number;
   frequency: Frequency;
   adminId: string;
   startDate: string;
   payoutType: PayoutType;
   inviteCode: string;
+  createdAt: string;
 }
 
 export interface ApiCommitteeMember {
@@ -27,17 +36,8 @@ export interface ApiCommitteeMember {
   committeeId: string;
   payoutOrder: number | null;
   hasReceivedPayout: boolean;
+  joinedAt: string;
   user: ApiUser;
-}
-
-export interface ApiPayout {
-  id: string;
-  committeeId: string;
-  cycleNumber: number;
-  recipientId: string;
-  status: PayoutStatus;
-  createdAt?: string;
-  committee?: ApiCommittee;
 }
 
 export interface ApiContribution {
@@ -52,40 +52,49 @@ export interface ApiContribution {
   committee: ApiCommittee;
 }
 
+export interface ApiPayout {
+  id: string;
+  committeeId: string;
+  cycleNumber: number;
+  recipientId: string;
+  status: PayoutStatus;
+  paidAt: string | null;
+  createdAt: string;
+  committee?: ApiCommittee;
+}
+
+/** `GET /committees/:id` — includes relations */
 export interface ApiCommitteeDetail extends ApiCommittee {
   members: ApiCommitteeMember[];
   payouts: ApiPayout[];
 }
 
+/** Membership row with nested committee (dashboard list) */
+export interface ApiDashboardMembership {
+  id: string;
+  userId: string;
+  committeeId: string;
+  payoutOrder: number | null;
+  hasReceivedPayout: boolean;
+  joinedAt: string;
+  committee: ApiCommittee;
+}
+
 export interface ApiDashboardResponse {
-  committees: Array<{
-    id: string;
-    userId: string;
-    committeeId: string;
-    payoutOrder: number | null;
-    hasReceivedPayout: boolean;
-    committee: ApiCommittee;
-  }>;
+  committees: ApiDashboardMembership[];
   pendingContributions: number;
   nextPayout: ApiPayout | null;
 }
 
-export interface UiCommitteeCard {
+/** `GET /committees/by-invite/:inviteCode` — minimal payload */
+export interface ApiCommitteeInvitePreview {
   id: string;
   name: string;
-  contributionAmount: number;
-  cycleLength: number;
-  currentCycle: number;
-  totalMembers: number;
-  frequency: Frequency;
-  payoutType: PayoutType;
-  startDate: string;
   inviteCode: string;
-  adminId: string;
 }
 
-export function parseMoney(value: string | number) {
+export function parseDecimal(value: DecimalString | number): number {
   if (typeof value === "number") return value;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 }

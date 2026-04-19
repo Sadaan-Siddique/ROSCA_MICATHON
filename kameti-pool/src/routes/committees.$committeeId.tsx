@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   ArrowLeft,
@@ -15,135 +15,213 @@ import {
   CheckCircle2,
   Clock,
   Sparkles,
+  ChevronUp,
+  ChevronDown,
+  Loader2,
+  Save,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { formatPKR } from "@/lib/mock-data";
-import { useBackendUser } from "@/hooks/use-backend-user";
-import { PayoutFlowDialog } from "@/components/PayoutFlowDialog";
+import { formatPKR } from "@/lib/format";
+import { avatarColorFromId } from "@/lib/avatar-color";
+import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
-import { api } from "@/lib/api";
-import type { ApiCommitteeDetail, ApiDashboardResponse } from "@/lib/api-types";
-import { parseMoney } from "@/lib/api-types";
+import {
+  getCommittee as apiGetCommittee,
+  getCurrentCycle,
+  generateNextCycle,
+  assignPayout,
+  updatePayoutOrder,
+  parseDecimal,
+} from "@/lib/api";
 
 export const Route = createFileRoute("/committees/$committeeId")({
   head: () => ({
     meta: [
       { title: "Committee — Kameti" },
-      { name: "description", content: "Manage your committee on Kameti." },
+      { name: "description", content: "Manage your Kameti committee." },
     ],
   }),
   component: CommitteeDetailsPage,
 });
 
-function avatarFromName(name: string) {
-  let hash = 0;
-  for (let index = 0; index < name.length; index += 1) {
-    hash = name.charCodeAt(index) + ((hash << 5) - hash);
-  }
-  return `hsl(${Math.abs(hash) % 360} 60% 45%)`;
-}
+type Member = {
+  id: string;
+  user: { id: string; name: string; avatarColor?: string };
+  payoutOrder: number;
+  hasReceivedPayout: boolean;
+  isOverdue?: boolean;
+  paid?: boolean;
+};
+
+type Committee = {
+  id: string;
+  name: string;
+  inviteCode: string;
+  contributionAmount: number;
+  cycleLength: number;
+  totalMembers: number;
+  currentCycle: number;
+  frequency: "WEEKLY" | "MONTHLY";
+  payoutType: "FIXED" | "RANDOM";
+  startDate: string;
+  adminId: string;
+};
 
 function CommitteeDetailsPage() {
   const { committeeId } = Route.useParams();
   const router = useRouter();
-  const { backendUser, loading: userLoading } = useBackendUser();
-  const [copied, setCopied] = useState(false);
-  const [payoutOpen, setPayoutOpen] = useState(false);
-  const [payoutMember, setPayoutMember] = useState<string>("");
-  const [committee, setCommittee] = useState<ApiCommitteeDetail | null>(null);
-  const [siblingCommittees, setSiblingCommittees] = useState<Array<{ id: string; name: string }>>([]);
-  const [currentCycle, setCurrentCycle] = useState(1);
+  const { user } = useAuth();
+  const [committee, setCommittee] = useState<Committee | null>(null);
+  const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const [busyAction, setBusyAction] = useState<"generate" | "assign" | "order" | null>(null);
+  const [orderEdit, setOrderEdit] = useState<Member[] | null>(null);
+  const [missing, setMissing] = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    setLoading(true);
+    setMissing(false);
+    try {
+      const [detail, cycle] = await Promise.all([
+        apiGetCommittee(committeeId),
+        getCurrentCycle(committeeId),
+      ]);
+      const cData = detail.data;
+      setCommittee({
+        id: cData.id,
+        name: cData.name,
+        inviteCode: cData.inviteCode,
+        contributionAmount: parseDecimal(cData.contributionAmount),
+        cycleLength: cData.cycleLength,
+        totalMembers: cData.members.length,
+        currentCycle: cycle.data.currentCycle,
+        frequency: cData.frequency,
+        payoutType: cData.payoutType,
+        startDate: cData.startDate,
+        adminId: cData.adminId,
+      });
+      setMembers(
+        [...cData.members]
+          .sort((a, b) => (a.payoutOrder ?? 999) - (b.payoutOrder ?? 999))
+          .map((m) => ({
+            id: m.id,
+            user: {
+              id: m.user.id,
+              name: m.user.name,
+              avatarColor: avatarColorFromId(m.user.id),
+            },
+            payoutOrder: m.payoutOrder ?? 0,
+            hasReceivedPayout: m.hasReceivedPayout,
+          })),
+      );
+    } catch {
+      setMissing(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [committeeId]);
 
   useEffect(() => {
-    if (!committeeId || !backendUser?.id) return;
-    setLoading(true);
-    Promise.all([
-      api.get<ApiCommitteeDetail>(`/committees/${committeeId}`),
-      api.get<{ currentCycle: number }>(`/committees/${committeeId}/current-cycle`),
-      api.get<ApiDashboardResponse>(`/dashboard/${backendUser.id}`)
-    ])
-      .then(([committeeResponse, cycleResponse, dashboardResponse]) => {
-        setCommittee(committeeResponse.data);
-        setCurrentCycle(cycleResponse.data.currentCycle);
-        const siblings = dashboardResponse.data.committees
-          .map((membership) => membership.committee)
-          .filter((item) => item.id !== committeeId)
-          .map((item) => ({ id: item.id, name: item.name }));
-        setSiblingCommittees(siblings);
-      })
-      .finally(() => setLoading(false));
-  }, [committeeId, backendUser?.id]);
+    void fetchAll();
+  }, [fetchAll]);
 
-  if (loading || userLoading) {
-    return <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10 text-sm text-muted-foreground">Loading committee...</div>;
-  }
-
-  if (!committee || !backendUser) {
+  if (!loading && missing) {
     return (
-      <div className="mx-auto max-w-2xl px-4 py-20 text-center">
-        <h1 className="text-2xl font-bold">Committee not found</h1>
-        <Link to="/" className="mt-4 inline-block text-primary hover:underline">
-          Back to Dashboard
-        </Link>
+      <div className="mx-auto max-w-lg px-4 py-16 text-center">
+        <p className="text-lg font-semibold">Committee not found</p>
+        <p className="mt-2 text-sm text-muted-foreground">It may have been removed or the link is invalid.</p>
+        <Button asChild className="mt-6">
+          <Link to="/">Back to dashboard</Link>
+        </Button>
       </div>
     );
   }
 
-  const contributionAmount = parseMoney(committee.contributionAmount);
-  const totalMembers = committee.members.length;
-  const totalPool = contributionAmount * committee.cycleLength;
+  if (loading || !committee) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  const totalPool = committee.contributionAmount * committee.cycleLength;
   const platformFee = totalPool * 0.01;
   const netPayout = totalPool - platformFee;
-  const progress = (currentCycle / committee.cycleLength) * 100;
-  const currentRecipient = useMemo(() => {
-    const byOrder = committee.members.find((member) => member.payoutOrder === currentCycle);
-    if (byOrder) return byOrder;
-    return committee.members.find((member) => member.userId === committee.payouts?.[0]?.recipientId);
-  }, [committee.members, committee.payouts, currentCycle]);
-  const isAdmin = committee.adminId === backendUser.id;
+  const progress = (committee.currentCycle / committee.cycleLength) * 100;
+  const sortedMembers = [...members].sort((a, b) => a.payoutOrder - b.payoutOrder);
+  const currentRecipient = sortedMembers.find((m) => m.payoutOrder === committee.currentCycle);
+  const isAdmin = !!user && committee.adminId === user.id;
 
   const copyInvite = () => {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
       navigator.clipboard.writeText(committee.inviteCode);
     }
     setCopied(true);
-    toast.success("Invite code copied", {
+    toast.success("Invite Link Copied", {
       description: `${committee.inviteCode} ready to share`,
     });
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleGenerateCycle = () => {
-    const nextCycle = currentCycle + 1;
-    api
-      .post(`/committees/${committee.id}/cycles/${nextCycle}/contributions/generate`)
-      .then(() => {
-        toast.success(`Cycle ${nextCycle} generated`, {
-          description: `${totalMembers} contribution requests sent · ${formatPKR(contributionAmount)} due per member`,
-        });
+  const handleGenerateCycle = async () => {
+    setBusyAction("generate");
+    try {
+      const nextCycle = committee.currentCycle + 1;
+      await generateNextCycle(committee.id, nextCycle);
+      toast.success(`Cycle ${nextCycle} generated`, {
+        description: `${committee.totalMembers} contribution slots · ${formatPKR(committee.contributionAmount)} due per member`,
       });
+      await fetchAll();
+    } finally {
+      setBusyAction(null);
+    }
   };
 
-  const handleAssignPayout = () => {
-    api
-      .post(`/committees/${committee.id}/cycles/${currentCycle}/payouts/assign`)
-      .then(async () => {
-        const [updatedCommittee, updatedCycle] = await Promise.all([
-          api.get<ApiCommitteeDetail>(`/committees/${committee.id}`),
-          api.get<{ currentCycle: number }>(`/committees/${committee.id}/current-cycle`)
-        ]);
-        setCommittee(updatedCommittee.data);
-        setCurrentCycle(updatedCycle.data.currentCycle);
-        const next = updatedCommittee.data.members.find((member) => !member.hasReceivedPayout);
-        setPayoutMember(next?.user.name ?? "next member");
-        setPayoutOpen(true);
-        toast.success(`Payout verified for Cycle ${currentCycle}`, {
-          description: `${formatPKR(netPayout)} routed to ${next?.user.name ?? "member"} · 1% fee deducted`,
-        });
+  const handleAssignPayout = async () => {
+    setBusyAction("assign");
+    try {
+      const res = await assignPayout(committee.id, committee.currentCycle);
+      const recipient = members.find((m) => m.user.id === res.data.recipientId);
+      toast.success(`Payout assigned for cycle ${committee.currentCycle}`, {
+        description: recipient ? `${recipient.user.name} · pool ${formatPKR(netPayout)}` : undefined,
       });
+      await fetchAll();
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const startReorder = () => setOrderEdit(sortedMembers);
+  const cancelReorder = () => setOrderEdit(null);
+  const moveMember = (idx: number, dir: -1 | 1) => {
+    if (!orderEdit) return;
+    const next = [...orderEdit];
+    const swap = idx + dir;
+    if (swap < 0 || swap >= next.length) return;
+    [next[idx], next[swap]] = [next[swap], next[idx]];
+    setOrderEdit(next);
+  };
+
+  const saveOrder = async () => {
+    if (!orderEdit) return;
+    setBusyAction("order");
+    try {
+      await updatePayoutOrder(
+        committee.id,
+        orderEdit.map((m, i) => ({ userId: m.user.id, payoutOrder: i + 1 })),
+      );
+      toast.success("Payout order updated", {
+        description: `${orderEdit.length} positions reassigned`,
+      });
+      setOrderEdit(null);
+      await fetchAll();
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   return (
@@ -192,7 +270,9 @@ function CommitteeDetailsPage() {
             <div
               className={cn(
                 "flex h-9 w-9 items-center justify-center rounded-lg transition-all",
-                copied ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground group-hover:bg-primary/20 group-hover:text-primary",
+                copied
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-secondary text-muted-foreground group-hover:bg-primary/20 group-hover:text-primary",
               )}
             >
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
@@ -203,10 +283,14 @@ function CommitteeDetailsPage() {
 
       {/* Stats */}
       <section className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard label="Per member" value={formatPKR(contributionAmount)} icon={<CircleDollarSign className="h-4 w-4" />} />
-        <StatCard label="Members" value={String(totalMembers)} icon={<Users className="h-4 w-4" />} />
+        <StatCard label="Per member" value={formatPKR(committee.contributionAmount)} icon={<CircleDollarSign className="h-4 w-4" />} />
+        <StatCard label="Members" value={String(committee.totalMembers ?? members.length)} icon={<Users className="h-4 w-4" />} />
         <StatCard label="Frequency" value={committee.frequency === "WEEKLY" ? "Weekly" : "Monthly"} icon={<Repeat className="h-4 w-4" />} />
-        <StatCard label="Started" value={new Date(committee.startDate).toLocaleDateString("en-PK", { month: "short", year: "numeric" })} icon={<Calendar className="h-4 w-4" />} />
+        <StatCard
+          label="Started"
+          value={new Date(committee.startDate).toLocaleDateString("en-PK", { month: "short", year: "numeric" })}
+          icon={<Calendar className="h-4 w-4" />}
+        />
       </section>
 
       {/* Current Cycle */}
@@ -215,7 +299,7 @@ function CommitteeDetailsPage() {
           <div>
             <p className="text-xs font-semibold uppercase tracking-widest text-primary">Current Cycle</p>
             <div className="tabular mt-1 flex items-baseline gap-2">
-              <span className="text-5xl font-bold">{currentCycle}</span>
+              <span className="text-5xl font-bold">{committee.currentCycle}</span>
               <span className="text-base text-muted-foreground">/ {committee.cycleLength}</span>
             </div>
             <p className="mt-2 text-sm text-muted-foreground">
@@ -245,50 +329,81 @@ function CommitteeDetailsPage() {
       <section className="mt-6">
         <div className="flex items-end justify-between">
           <h2 className="text-xl font-bold tracking-tight">Members</h2>
-          <span className="text-xs text-muted-foreground tabular">
-            {committee.members.filter((m) => m.hasReceivedPayout).length} / {committee.members.length} paid out
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground tabular">
+              {members.filter((m) => m.hasReceivedPayout).length} / {members.length} paid out
+            </span>
+            {isAdmin && !orderEdit && (
+              <Button size="sm" variant="outline" onClick={startReorder}>
+                Reorder payouts
+              </Button>
+            )}
+            {orderEdit && (
+              <div className="flex gap-2">
+                <Button size="sm" variant="ghost" onClick={cancelReorder} disabled={busyAction === "order"}>
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={saveOrder} disabled={busyAction === "order"}>
+                  {busyAction === "order" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                  Save order
+                </Button>
+              </div>
+            )}
+          </div>
         </div>
         <Card className="mt-4 border-border/60">
           <div className="divide-y divide-border/60">
-            {committee.members
-              .slice()
-              .sort((a, b) => (a.payoutOrder ?? 999) - (b.payoutOrder ?? 999))
-              .map((m) => {
-                const safeOrder = m.payoutOrder ?? 0;
-                const isCurrent = safeOrder === currentCycle;
-                return (
+            {(orderEdit ?? sortedMembers).map((m, idx) => {
+              const isCurrent = !orderEdit && m.payoutOrder === committee.currentCycle;
+              const order = orderEdit ? idx + 1 : m.payoutOrder;
+              return (
+                <div
+                  key={m.id ?? m.user.id}
+                  className={cn(
+                    "flex items-center gap-4 px-5 py-4 transition-colors",
+                    isCurrent && "bg-primary/5",
+                  )}
+                >
                   <div
-                    key={m.id}
-                    className={cn(
-                      "flex items-center gap-4 px-5 py-4 transition-colors",
-                      isCurrent && "bg-primary/5",
-                    )}
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold text-primary-foreground"
+                    style={{ background: m.user.avatarColor ?? "oklch(0.74 0.17 158)" }}
                   >
-                    <div
-                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold text-primary-foreground"
-                      style={{ background: avatarFromName(m.user.name) }}
-                    >
-                      {m.user.name
-                        .split(" ")
-                        .map((n) => n[0])
-                        .slice(0, 2)
-                        .join("")}
+                    {m.user.name.split(" ").map((n) => n[0]).slice(0, 2).join("")}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="truncate font-semibold">{m.user.name}</p>
+                      {user && m.user.id === user.id && (
+                        <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                          You
+                        </span>
+                      )}
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <p className="truncate font-semibold">{m.user.name}</p>
-                        {m.user.id === backendUser.id && (
-                          <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                            You
-                          </span>
-                        )}
-                      </div>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        Payout order · <span className="tabular font-semibold text-foreground">#{safeOrder}</span>
-                      </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      Payout order · <span className="tabular font-semibold text-foreground">#{order}</span>
+                    </p>
+                  </div>
+                  {orderEdit ? (
+                    <div className="flex flex-col gap-1">
+                      <Button size="icon" variant="outline" className="h-7 w-7" onClick={() => moveMember(idx, -1)} disabled={idx === 0}>
+                        <ChevronUp className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button size="icon" variant="outline" className="h-7 w-7" onClick={() => moveMember(idx, 1)} disabled={idx === orderEdit.length - 1}>
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      </Button>
                     </div>
-                    <div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      {m.isOverdue && !m.paid && !m.hasReceivedPayout && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-destructive">
+                          Overdue
+                        </span>
+                      )}
+                      {m.paid && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-success">
+                          Paid
+                        </span>
+                      )}
                       {m.hasReceivedPayout ? (
                         <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/15 px-2.5 py-1 text-xs font-semibold text-primary">
                           <CheckCircle2 className="h-3.5 w-3.5" />
@@ -306,9 +421,13 @@ function CommitteeDetailsPage() {
                         </span>
                       )}
                     </div>
-                  </div>
-                );
-              })}
+                  )}
+                </div>
+              );
+            })}
+            {members.length === 0 && (
+              <div className="px-5 py-10 text-center text-sm text-muted-foreground">No members yet.</div>
+            )}
           </div>
         </Card>
       </section>
@@ -321,9 +440,9 @@ function CommitteeDetailsPage() {
               <Zap className="h-4 w-4" />
             </div>
             <div>
-              <h3 className="font-bold">Hackathon Demo Actions</h3>
+              <h3 className="font-bold">Admin / Demo Actions</h3>
               <p className="text-xs text-muted-foreground">
-                {isAdmin ? "Admin-only debug controls for live demos" : "Switch to an admin user to enable these controls"}
+                {isAdmin ? "Trigger backend cycle + payout endpoints" : "Only the committee admin can run these"}
               </p>
             </div>
           </div>
@@ -338,16 +457,16 @@ function CommitteeDetailsPage() {
             variant="outline"
             size="lg"
             onClick={handleGenerateCycle}
-            disabled={!isAdmin}
+            disabled={!isAdmin || busyAction !== null}
             className="h-14 justify-start border-border/80 bg-card/60 text-left"
           >
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-secondary text-foreground">
-              <Repeat className="h-4 w-4" />
+              {busyAction === "generate" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Repeat className="h-4 w-4" />}
             </div>
             <div className="ml-1 flex flex-col items-start leading-tight">
               <span className="text-sm font-bold">Generate Next Cycle</span>
               <span className="text-[11px] font-normal text-muted-foreground">
-                POST /cycles/{currentCycle + 1}/contributions/generate
+                POST /cycles/{committee.currentCycle + 1}/contributions/generate
               </span>
             </div>
           </Button>
@@ -355,47 +474,26 @@ function CommitteeDetailsPage() {
           <Button
             size="lg"
             onClick={handleAssignPayout}
-            disabled={!isAdmin}
+            disabled={!isAdmin || busyAction !== null}
             className="h-14 justify-start shadow-emerald"
           >
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary-foreground/20">
-              <TrendingUp className="h-4 w-4" />
+              {busyAction === "assign" ? <Loader2 className="h-4 w-4 animate-spin" /> : <TrendingUp className="h-4 w-4" />}
             </div>
             <div className="ml-1 flex flex-col items-start leading-tight">
               <span className="text-sm font-bold">Process Month / Assign Payout</span>
               <span className="text-[11px] font-normal text-primary-foreground/80">
-                POST /cycles/{currentCycle}/payouts/assign
+                POST /cycles/{committee.currentCycle}/payouts/assign
               </span>
             </div>
           </Button>
         </div>
       </section>
 
-      {/* Multi-step Payout Visualization */}
-      <PayoutFlowDialog
-        open={payoutOpen}
-        onOpenChange={setPayoutOpen}
-        totalPool={totalPool}
-        platformFee={platformFee}
-        netPayout={netPayout}
-        totalMembers={totalMembers}
-        recipientName={payoutMember}
-        cycleNumber={currentCycle}
-        committeeName={committee.name}
-      />
-
-      {/* Sibling committees nav */}
-      <div className="mt-10 flex flex-wrap gap-2">
-        {siblingCommittees.map((c) => (
-          <Link
-            key={c.id}
-            to="/committees/$committeeId"
-            params={{ committeeId: c.id }}
-            className="rounded-full border border-border/60 bg-card/60 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
-          >
-            {c.name}
-          </Link>
-        ))}
+      <div className="mt-10">
+        <Link to="/" className="text-xs text-muted-foreground hover:text-foreground">
+          ← Back to all committees
+        </Link>
       </div>
     </div>
   );
@@ -416,9 +514,7 @@ function StatCard({ label, value, icon }: { label: string; value: string; icon: 
 function MiniStat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
     <div className="rounded-lg border border-border/60 bg-background/40 p-2.5">
-      <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-        {label}
-      </p>
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</p>
       <p className={cn("tabular mt-0.5 text-sm font-bold", accent ? "text-primary" : "text-foreground")}>
         {value}
       </p>

@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { formatPKR } from "@/lib/mock-data";
+import { formatPKR } from "@/lib/format";
 
 interface Props {
   open: boolean;

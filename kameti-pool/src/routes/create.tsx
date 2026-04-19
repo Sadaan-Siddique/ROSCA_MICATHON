@@ -1,5 +1,8 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect } from "react";
+import { useForm, Controller } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
 import { toast } from "sonner";
 import {
   ArrowLeft,
@@ -9,6 +12,7 @@ import {
   ListOrdered,
   Sparkles,
   ShieldCheck,
+  Loader2,
 } from "lucide-react";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
@@ -17,64 +21,93 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Link } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
-import { formatPKR } from "@/lib/mock-data";
-import { useBackendUser } from "@/hooks/use-backend-user";
-import { api } from "@/lib/api";
+import { formatPKR } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
+import { createCommittee } from "@/lib/api";
 
 export const Route = createFileRoute("/create")({
   head: () => ({
     meta: [
       { title: "Create New Kameti — Kameti" },
-      { name: "description", content: "Create a new digital committee with custom contribution, frequency and members." },
+      {
+        name: "description",
+        content: "Create a new digital committee with custom contribution, frequency and members.",
+      },
     ],
   }),
   component: CreatePage,
 });
 
-type Frequency = "WEEKLY" | "MONTHLY";
-type PayoutType = "FIXED" | "RANDOM";
+const schema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(3, "Name must be at least 3 characters")
+    .max(120, "Name must be at most 120 characters"),
+  contributionAmount: z.number().positive("Must be positive"),
+  cycleLength: z
+    .number()
+    .int("Must be whole number")
+    .positive("Must be positive")
+    .max(50, "Max 50 members"),
+  frequency: z.enum(["WEEKLY", "MONTHLY"]),
+  startDate: z.date({ message: "Pick a start date" }),
+  payoutType: z.enum(["FIXED", "RANDOM"]),
+});
+
+type FormValues = z.infer<typeof schema>;
 
 function CreatePage() {
   const navigate = useNavigate();
-  const { backendUser } = useBackendUser();
-  const [name, setName] = useState("");
-  const [amount, setAmount] = useState<number | "">("");
-  const [members, setMembers] = useState<number | "">("");
-  const [frequency, setFrequency] = useState<Frequency>("MONTHLY");
-  const [payoutType, setPayoutType] = useState<PayoutType>("FIXED");
-  const [startDate, setStartDate] = useState<Date | undefined>(new Date());
+  const { user, loading } = useAuth();
 
-  const amt = typeof amount === "number" ? amount : 0;
-  const mem = typeof members === "number" ? members : 0;
-  const totalPool = amt * mem;
-  const safepay = amt * 0.1;
+  useEffect(() => {
+    if (!loading && !user) navigate({ to: "/" });
+  }, [loading, user, navigate]);
+
+  const form = useForm<FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: {
+      name: "",
+      contributionAmount: undefined as unknown as number,
+      cycleLength: undefined as unknown as number,
+      frequency: "MONTHLY",
+      startDate: new Date(),
+      payoutType: "FIXED",
+    },
+  });
+
+  const amount = form.watch("contributionAmount") || 0;
+  const members = form.watch("cycleLength") || 0;
+  const totalPool = Number(amount) * Number(members);
+  const safepay = Number(amount) * 0.1;
   const platformFee = totalPool * 0.01;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim() || !amt || !mem || !startDate || !backendUser?.id) {
-      toast.error("Please complete all fields");
-      return;
-    }
-
+  const onSubmit = async (values: FormValues) => {
+    if (!user) return;
     try {
-      const response = await api.post("/committees", {
-        name,
-        contributionAmount: amt,
-        cycleLength: mem,
-        frequency,
-        adminId: backendUser.id,
-        startDate: startDate.toISOString(),
-        payoutType
+      const res = await createCommittee({
+        name: values.name,
+        contributionAmount: Number(values.contributionAmount),
+        cycleLength: Number(values.cycleLength),
+        frequency: values.frequency,
+        startDate: values.startDate.toISOString(),
+        payoutType: values.payoutType,
+        adminId: user.id,
       });
+      const created = res.data;
       toast.success("Kameti created", {
-        description: `${name} is live with ${mem} members.`,
+        description: `${values.name} is live with ${values.cycleLength} members.`,
       });
-      navigate({ to: "/committees/$committeeId", params: { committeeId: response.data.id } });
+      toast("10% Safepay Advance Secured", {
+        description: `${formatPKR(safepay)} held in vault from each member`,
+      });
+      const id = created?.id;
+      if (id) navigate({ to: "/committees/$committeeId", params: { committeeId: id } });
+      else navigate({ to: "/" });
     } catch {
-      // handled by interceptor
+      // global toast
     }
   };
 
@@ -99,7 +132,10 @@ function CreatePage() {
         </p>
       </div>
 
-      <form onSubmit={handleSubmit} className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_380px]">
+      <form
+        onSubmit={form.handleSubmit(onSubmit)}
+        className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_380px]"
+      >
         <Card className="border-border/60">
           <CardContent className="space-y-7 p-6 sm:p-8">
             <div className="space-y-2">
@@ -109,10 +145,12 @@ function CreatePage() {
               <Input
                 id="name"
                 placeholder="e.g. Family Gold Pool"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
                 className="h-11"
+                {...form.register("name")}
               />
+              {form.formState.errors.name && (
+                <p className="text-xs text-destructive">{form.formState.errors.name.message}</p>
+              )}
             </div>
 
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
@@ -129,12 +167,16 @@ function CreatePage() {
                     type="number"
                     inputMode="numeric"
                     min={0}
-                    placeholder="25,000"
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
+                    placeholder="25000"
                     className="tabular h-11 pl-14 text-base font-semibold"
+                    {...form.register("contributionAmount", { valueAsNumber: true })}
                   />
                 </div>
+                {form.formState.errors.contributionAmount && (
+                  <p className="text-xs text-destructive">
+                    {form.formState.errors.contributionAmount.message}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -148,71 +190,97 @@ function CreatePage() {
                   min={2}
                   max={50}
                   placeholder="8"
-                  value={members}
-                  onChange={(e) => setMembers(e.target.value === "" ? "" : Number(e.target.value))}
                   className="tabular h-11 text-base font-semibold"
+                  {...form.register("cycleLength", { valueAsNumber: true })}
                 />
+                {form.formState.errors.cycleLength && (
+                  <p className="text-xs text-destructive">{form.formState.errors.cycleLength.message}</p>
+                )}
               </div>
             </div>
 
-            <div className="space-y-2">
-              <Label className="text-sm font-semibold">Frequency</Label>
-              <ToggleGroup
-                value={frequency}
-                onChange={(v) => setFrequency(v as Frequency)}
-                options={[
-                  { value: "WEEKLY", label: "Weekly", icon: <Repeat className="h-4 w-4" /> },
-                  { value: "MONTHLY", label: "Monthly", icon: <CalendarIcon className="h-4 w-4" /> },
-                ]}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-sm font-semibold">Start Date</Label>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className={cn(
-                      "h-11 w-full justify-start text-left font-normal",
-                      !startDate && "text-muted-foreground",
-                    )}
-                  >
-                    <CalendarIcon className="h-4 w-4" />
-                    {startDate ? format(startDate, "PPP") : <span>Pick a date</span>}
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
-                  <Calendar
-                    mode="single"
-                    selected={startDate}
-                    onSelect={setStartDate}
-                    initialFocus
-                    className={cn("p-3 pointer-events-auto")}
+            <Controller
+              control={form.control}
+              name="frequency"
+              render={({ field }) => (
+                <div className="space-y-2">
+                  <Label className="text-sm font-semibold">Frequency</Label>
+                  <ToggleGroup
+                    value={field.value}
+                    onChange={(v) => field.onChange(v)}
+                    options={[
+                      { value: "WEEKLY", label: "Weekly", icon: <Repeat className="h-4 w-4" /> },
+                      { value: "MONTHLY", label: "Monthly", icon: <CalendarIcon className="h-4 w-4" /> },
+                    ]}
                   />
-                </PopoverContent>
-              </Popover>
-            </div>
+                </div>
+              )}
+            />
 
-            <div className="space-y-2">
-              <Label className="text-sm font-semibold">Payout Type</Label>
-              <ToggleGroup
-                value={payoutType}
-                onChange={(v) => setPayoutType(v as PayoutType)}
-                options={[
-                  { value: "FIXED", label: "Fixed Order", icon: <ListOrdered className="h-4 w-4" /> },
-                  { value: "RANDOM", label: "Random Draw", icon: <Shuffle className="h-4 w-4" /> },
-                ]}
-              />
-              <p className="pt-1 text-xs text-muted-foreground">
-                {payoutType === "FIXED"
-                  ? "Members receive payouts in a predefined sequence."
-                  : "A random member is selected at each cycle's payout."}
-              </p>
-            </div>
+            <Controller
+              control={form.control}
+              name="startDate"
+              render={({ field }) => (
+                <div className="space-y-2">
+                  <Label className="text-sm font-semibold">Start Date</Label>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className={cn(
+                          "h-11 w-full justify-start text-left font-normal",
+                          !field.value && "text-muted-foreground",
+                        )}
+                      >
+                        <CalendarIcon className="h-4 w-4" />
+                        {field.value ? format(field.value, "PPP") : <span>Pick a date</span>}
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-auto p-0" align="start">
+                      <Calendar
+                        mode="single"
+                        selected={field.value}
+                        onSelect={field.onChange}
+                        initialFocus
+                        className={cn("p-3 pointer-events-auto")}
+                      />
+                    </PopoverContent>
+                  </Popover>
+                </div>
+              )}
+            />
 
-            <Button type="submit" size="lg" className="h-12 w-full shadow-emerald font-semibold">
+            <Controller
+              control={form.control}
+              name="payoutType"
+              render={({ field }) => (
+                <div className="space-y-2">
+                  <Label className="text-sm font-semibold">Payout Type</Label>
+                  <ToggleGroup
+                    value={field.value}
+                    onChange={(v) => field.onChange(v)}
+                    options={[
+                      { value: "FIXED", label: "Fixed Order", icon: <ListOrdered className="h-4 w-4" /> },
+                      { value: "RANDOM", label: "Random Draw", icon: <Shuffle className="h-4 w-4" /> },
+                    ]}
+                  />
+                  <p className="pt-1 text-xs text-muted-foreground">
+                    {field.value === "FIXED"
+                      ? "Members receive payouts in a predefined sequence."
+                      : "A random member is selected at each cycle's payout."}
+                  </p>
+                </div>
+              )}
+            />
+
+            <Button
+              type="submit"
+              size="lg"
+              disabled={form.formState.isSubmitting}
+              className="h-12 w-full shadow-emerald font-semibold"
+            >
+              {form.formState.isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               Launch Kameti
             </Button>
           </CardContent>
@@ -248,9 +316,7 @@ function CreatePage() {
                 <p className="tabular mt-1 text-2xl font-bold text-primary">
                   {formatPKR(totalPool - platformFee)}
                 </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Net of 1% platform fee
-                </p>
+                <p className="mt-1 text-xs text-muted-foreground">Net of 1% platform fee</p>
               </div>
             </CardContent>
           </Card>

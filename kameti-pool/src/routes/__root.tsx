@@ -1,7 +1,8 @@
 import { Outlet, Link, createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
 import { Toaster } from "@/components/ui/sonner";
-import { Wallet, LayoutDashboard, Plus } from "lucide-react";
-import { UserSwitcher } from "@/components/UserSwitcher";
+import { Wallet, LayoutDashboard, Plus, LogOut } from "lucide-react";
+import { AuthProvider, useAuth } from "@/lib/auth-context";
+import { Button } from "@/components/ui/button";
 
 import appCss from "../styles.css?url";
 
@@ -49,15 +50,8 @@ export const Route = createRootRoute({
     ],
     links: [
       { rel: "stylesheet", href: appCss },
-      {
-        rel: "preconnect",
-        href: "https://fonts.googleapis.com",
-      },
-      {
-        rel: "preconnect",
-        href: "https://fonts.gstatic.com",
-        crossOrigin: "anonymous",
-      },
+      { rel: "preconnect", href: "https://fonts.googleapis.com" },
+      { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       {
         rel: "stylesheet",
         href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap",
@@ -85,21 +79,36 @@ function RootShell({ children }: { children: React.ReactNode }) {
 
 function RootComponent() {
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <header className="sticky top-0 z-40 border-b border-border/60 glass">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6">
-          <Link to="/" className="flex items-center gap-2.5 group">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-emerald transition-transform group-hover:scale-105">
-              <Wallet className="h-5 w-5" />
-            </div>
-            <div className="flex flex-col leading-none">
-              <span className="text-base font-bold tracking-tight">Kameti</span>
-              <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-                Digital ROSCA
-              </span>
-            </div>
-          </Link>
+    <AuthProvider>
+      <div className="min-h-screen bg-background text-foreground">
+        <AppHeader />
+        <main>
+          <Outlet />
+        </main>
+        <Toaster />
+      </div>
+    </AuthProvider>
+  );
+}
 
+function AppHeader() {
+  const { user, logout } = useAuth();
+  return (
+    <header className="sticky top-0 z-40 border-b border-border/60 glass">
+      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6">
+        <Link to="/" className="flex items-center gap-2.5 group">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-emerald transition-transform group-hover:scale-105">
+            <Wallet className="h-5 w-5" />
+          </div>
+          <div className="flex flex-col leading-none">
+            <span className="text-base font-bold tracking-tight">Kameti</span>
+            <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+              Digital ROSCA
+            </span>
+          </div>
+        </Link>
+
+        {user && (
           <nav className="hidden items-center gap-1 sm:flex">
             <Link
               to="/"
@@ -119,22 +128,29 @@ function RootComponent() {
               New Kameti
             </Link>
           </nav>
+        )}
 
-          <div className="flex items-center gap-3">
-            <div className="hidden items-center gap-2 rounded-full border border-border/60 bg-card/60 px-3 py-1.5 sm:flex">
-              <span className="h-2 w-2 rounded-full bg-primary shadow-emerald" />
-              <span className="text-xs font-medium text-muted-foreground">Verified</span>
-            </div>
-            <UserSwitcher />
-          </div>
+        <div className="flex items-center gap-3">
+          {user ? (
+            <>
+              <div className="hidden items-center gap-2 rounded-full border border-border/60 bg-card/60 px-3 py-1.5 sm:flex">
+                <span className="h-2 w-2 rounded-full bg-primary shadow-emerald" />
+                <span className="text-xs font-medium text-muted-foreground">Verified</span>
+              </div>
+              <div className="hidden items-center gap-2 rounded-full border border-border/60 bg-card/60 py-1 pl-1 pr-3 sm:flex">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+                  {user.name.split(" ").map((n) => n[0]).slice(0, 2).join("")}
+                </div>
+                <span className="text-xs font-semibold">{user.name}</span>
+              </div>
+              <Button size="sm" variant="ghost" onClick={logout} className="text-muted-foreground">
+                <LogOut className="h-4 w-4" />
+                <span className="hidden sm:inline">Logout</span>
+              </Button>
+            </>
+          ) : null}
         </div>
-      </header>
-
-      <main>
-        <Outlet />
-      </main>
-
-      <Toaster />
-    </div>
+      </div>
+    </header>
   );
 }

@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   Wallet,
@@ -14,10 +14,9 @@ import {
   Eye,
   EyeOff,
   ShieldCheck,
+  Loader2,
 } from "lucide-react";
-import {
-  formatPKR,
-} from "@/lib/mock-data";
+import { formatPKR } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -33,10 +32,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SafepayDrawer } from "@/components/SafepayDrawer";
-import { useBackendUser } from "@/hooks/use-backend-user";
-import { api } from "@/lib/api";
-import type { ApiContribution, ApiDashboardResponse, ApiPayout, UiCommitteeCard } from "@/lib/api-types";
-import { parseMoney } from "@/lib/api-types";
+import { Landing } from "@/components/Landing";
+import { useAuth } from "@/lib/auth-context";
+import {
+  getDashboard,
+  getPendingContributions,
+  getCommitteeByInvite,
+  getCommitteeMembers,
+  getCurrentCycle,
+  joinCommittee,
+  parseDecimal,
+} from "@/lib/api";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -49,122 +55,137 @@ export const Route = createFileRoute("/")({
       },
     ],
   }),
-  component: DashboardPage,
+  component: HomePage,
 });
 
+function HomePage() {
+  const { user, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+      </div>
+    );
+  }
+  if (!user) return <Landing />;
+  return <DashboardPage />;
+}
+
+type PendingContribution = {
+  id: string;
+  committeeId: string;
+  committeeName: string;
+  amount: number;
+  dueDate: string;
+  cycleNumber: number;
+};
+
+type DashboardCommittee = {
+  id: string;
+  name: string;
+  contributionAmount: number;
+  cycleLength: number;
+  currentCycle: number;
+  totalMembers: number;
+  frequency: "WEEKLY" | "MONTHLY";
+  startDate: string;
+};
+
+type DashboardData = {
+  walletBalance: number;
+  committees: DashboardCommittee[];
+  nextPayout?: {
+    committeeId: string;
+    committeeName: string;
+    amount: number;
+    expectedDate: string;
+    cycleNumber: number;
+    recipientId: string;
+  } | null;
+};
+
 function DashboardPage() {
-  const [showBalance, setShowBalance] = useState(true);
-  const [joinCode, setJoinCode] = useState("");
-  const [joinOpen, setJoinOpen] = useState(false);
-  const [committees, setCommittees] = useState<UiCommitteeCard[]>([]);
-  const [pendingContributions, setPendingContributions] = useState<ApiContribution[]>([]);
-  const [nextPayout, setNextPayout] = useState<ApiPayout | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [activePay, setActivePay] = useState<ApiContribution | null>(null);
+  const { user } = useAuth();
   const navigate = useNavigate();
-  const { backendUser } = useBackendUser();
+  const [showBalance, setShowBalance] = useState(true);
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [pending, setPending] = useState<PendingContribution[]>([]);
+  const [activePay, setActivePay] = useState<PendingContribution | null>(null);
+  const [loadingData, setLoadingData] = useState(true);
+
+  const loadData = useCallback(async () => {
+    if (!user) return;
+    setLoadingData(true);
+    try {
+      const [dashRes, pendRes] = await Promise.all([
+        getDashboard(user.id),
+        getPendingContributions(user.id),
+      ]);
+      const dash = dashRes.data;
+      const pendingList: PendingContribution[] = pendRes.data.map((c) => ({
+        id: c.id,
+        committeeId: c.committeeId,
+        committeeName: c.committee.name,
+        amount: parseDecimal(c.committee.contributionAmount),
+        dueDate: c.dueDate,
+        cycleNumber: c.cycleNumber,
+      }));
+
+      const committeesEnriched: DashboardCommittee[] = await Promise.all(
+        (dash.committees ?? []).map(async (m) => {
+          const c = m.committee;
+          const [cycleRes, membersRes] = await Promise.all([
+            getCurrentCycle(c.id),
+            getCommitteeMembers(c.id),
+          ]);
+          return {
+            id: c.id,
+            name: c.name,
+            contributionAmount: parseDecimal(c.contributionAmount),
+            cycleLength: c.cycleLength,
+            currentCycle: cycleRes.data.currentCycle,
+            totalMembers: membersRes.data.length,
+            frequency: c.frequency,
+            startDate: c.startDate,
+          };
+        }),
+      );
+
+      let nextPayout: DashboardData["nextPayout"] = null;
+      const np = dash.nextPayout;
+      if (np?.committee) {
+        const c = np.committee;
+        nextPayout = {
+          committeeId: np.committeeId,
+          committeeName: c.name,
+          amount: parseDecimal(c.contributionAmount) * c.cycleLength,
+          expectedDate: np.createdAt,
+          cycleNumber: np.cycleNumber,
+          recipientId: np.recipientId,
+        };
+      }
+
+      setData({
+        walletBalance: 0,
+        committees: committeesEnriched,
+        nextPayout,
+      });
+      setPending(pendingList);
+    } catch {
+      /* global toast */
+    } finally {
+      setLoadingData(false);
+    }
+  }, [user]);
 
   useEffect(() => {
-    if (!backendUser?.id) return;
-    setLoading(true);
+    void loadData();
+  }, [loadData]);
 
-    Promise.all([
-      api.get<ApiDashboardResponse>(`/dashboard/${backendUser.id}`),
-      api.get<ApiContribution[]>(`/dashboard/${backendUser.id}/pending-contributions`)
-    ])
-      .then(async ([dashboardResponse, pendingResponse]) => {
-        const baseCommittees = dashboardResponse.data.committees.map((membership) => ({
-          id: membership.committee.id,
-          name: membership.committee.name,
-          contributionAmount: parseMoney(membership.committee.contributionAmount),
-          cycleLength: membership.committee.cycleLength,
-          currentCycle: 1,
-          totalMembers: 0,
-          frequency: membership.committee.frequency,
-          payoutType: membership.committee.payoutType,
-          startDate: membership.committee.startDate,
-          inviteCode: membership.committee.inviteCode,
-          adminId: membership.committee.adminId
-        }));
-
-        const committeeWithCycles = await Promise.all(
-          baseCommittees.map(async (committee) => {
-            const [cycleResponse, membersResponse] = await Promise.all([
-              api.get<{ currentCycle: number }>(`/committees/${committee.id}/current-cycle`),
-              api.get<Array<{ id: string }>>(`/committees/${committee.id}/members`)
-            ]);
-            return {
-              ...committee,
-              currentCycle: cycleResponse.data.currentCycle ?? 1,
-              totalMembers: membersResponse.data.length
-            };
-          })
-        );
-
-        setCommittees(committeeWithCycles);
-        setPendingContributions(pendingResponse.data);
-        setNextPayout(dashboardResponse.data.nextPayout);
-      })
-      .finally(() => {
-        setLoading(false);
-      });
-  }, [backendUser?.id]);
-
-  const walletBalance = useMemo(
-    () =>
-      pendingContributions.reduce((sum, contribution) => {
-        const amount = parseMoney(contribution.committee.contributionAmount);
-        return sum + amount;
-      }, 0),
-    [pendingContributions]
-  );
-
-  const handleJoin = async () => {
-    if (!joinCode.trim()) {
-      toast.error("Please enter an invite code");
-      return;
-    }
-
-    if (!backendUser?.id) {
-      toast.error("User is not ready yet, please retry in a moment");
-      return;
-    }
-
-    try {
-      const committeeResponse = await api.get<{ id: string; inviteCode: string }>(
-        `/committees/by-invite/${joinCode.toUpperCase()}`
-      );
-      await api.post(`/committees/${committeeResponse.data.id}/join`, {
-        userId: backendUser.id,
-        inviteCode: committeeResponse.data.inviteCode
-      });
-      toast.success("Joined committee successfully");
-      setJoinCode("");
-      setJoinOpen(false);
-    } catch {
-      // handled by interceptor
-    }
-  };
-
-  const handlePaid = async (contributionId: string) => {
-    try {
-      await api.patch(`/contributions/${contributionId}/pay`);
-      setPendingContributions((prev) => prev.filter((item) => item.id !== contributionId));
-      setActivePay(null);
-      toast.success("Payment marked successfully");
-    } catch {
-      // handled by interceptor
-    }
-  };
-
+  const walletBalance = data?.walletBalance ?? 0;
+  const committees = data?.committees ?? [];
+  const nextPayout = data?.nextPayout ?? null;
   const isOverdue = (dueDate: string) => new Date(dueDate).getTime() < Date.now();
-
-  const pending = pendingContributions;
-  const nextPayoutCommittee = committees.find((committee) => committee.id === nextPayout?.committeeId);
-  const nextPayoutAmount = nextPayoutCommittee
-    ? nextPayoutCommittee.contributionAmount * nextPayoutCommittee.cycleLength
-    : 0;
-  const nextPayoutDate = nextPayout?.createdAt ?? new Date().toISOString();
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">
@@ -176,7 +197,9 @@ function DashboardPage() {
               <ShieldCheck className="h-3.5 w-3.5 text-primary" />
               Secure Wallet · Protected by Kameti Vault
             </div>
-            <p className="mt-4 text-sm text-muted-foreground">Available balance</p>
+            <p className="mt-4 text-sm text-muted-foreground">
+              Welcome back, <span className="font-semibold text-foreground">{user?.name}</span>
+            </p>
             <div className="mt-2 flex items-center gap-3">
               <h1 className="tabular text-4xl font-bold tracking-tight sm:text-6xl">
                 {showBalance ? formatPKR(walletBalance) : "PKR ••••••"}
@@ -191,8 +214,12 @@ function DashboardPage() {
             </div>
             <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
               <TrendingUp className="h-3.5 w-3.5" />
-              <span className="tabular">+12.4%</span> this cycle
+              <span className="tabular">{committees.length}</span> active committees
             </div>
+            <p className="mt-2 max-w-md text-[11px] text-muted-foreground">
+              Vault balance will reflect settled funds when the wallet service is connected. Contribution amounts below
+              are live from your committees.
+            </p>
           </div>
 
           <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2 lg:w-auto">
@@ -202,43 +229,7 @@ function DashboardPage() {
                 Create New Kameti
               </Link>
             </Button>
-
-            <Dialog open={joinOpen} onOpenChange={setJoinOpen}>
-              <DialogTrigger asChild>
-                <Button
-                  size="lg"
-                  variant="outline"
-                  className="h-14 border-border/80 bg-card/40 font-semibold backdrop-blur"
-                >
-                  <KeyRound className="h-5 w-5" />
-                  Join via Invite Code
-                </Button>
-              </DialogTrigger>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Join a Kameti</DialogTitle>
-                  <DialogDescription>
-                    Enter the invite code shared by the committee admin.
-                  </DialogDescription>
-                </DialogHeader>
-                <div className="space-y-2">
-                  <Label htmlFor="invite">Invite Code</Label>
-                  <Input
-                    id="invite"
-                    placeholder="KMT-XXX-0000"
-                    value={joinCode}
-                    onChange={(e) => setJoinCode(e.target.value)}
-                    className="tabular uppercase"
-                  />
-                </div>
-                <DialogFooter>
-                  <Button variant="ghost" onClick={() => setJoinOpen(false)}>
-                    Cancel
-                  </Button>
-                  <Button onClick={handleJoin}>Join Kameti</Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+            <JoinDialog onJoined={() => void loadData()} />
           </div>
         </div>
       </section>
@@ -264,7 +255,7 @@ function DashboardPage() {
                 >
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <p className="font-semibold text-foreground">{p.committee.name}</p>
+                      <p className="font-semibold text-foreground">{p.committeeName}</p>
                       {overdue && (
                         <span className="rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-destructive">
                           Overdue
@@ -272,12 +263,13 @@ function DashboardPage() {
                       )}
                     </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">
-                      Cycle #{p.cycleNumber} · Due {new Date(p.dueDate).toLocaleDateString("en-PK", { day: "numeric", month: "short" })}
+                      Cycle #{p.cycleNumber} · Due{" "}
+                      {new Date(p.dueDate).toLocaleDateString("en-PK", { day: "numeric", month: "short" })}
                     </p>
                   </div>
                   <div className="flex items-center justify-between gap-4 sm:gap-6">
                     <span className="tabular text-lg font-bold text-foreground">
-                      {formatPKR(parseMoney(p.committee.contributionAmount))}
+                      {formatPKR(p.amount)}
                     </span>
                     <Button
                       size="sm"
@@ -298,48 +290,67 @@ function DashboardPage() {
         <SafepayDrawer
           open={!!activePay}
           onOpenChange={(o) => !o && setActivePay(null)}
-          amount={parseMoney(activePay.committee.contributionAmount)}
-          committeeName={activePay.committee.name}
+          contributionId={activePay.id}
+          amount={activePay.amount}
+          committeeName={activePay.committeeName}
           cycleNumber={activePay.cycleNumber}
-          onComplete={() => handlePaid(activePay.id)}
+          onComplete={() => {
+            setActivePay(null);
+            void loadData();
+          }}
         />
       )}
 
-      {/* Next Payout Banner */}
-      {nextPayout ? (
-      <section className="mt-6 overflow-hidden rounded-2xl border border-primary/30 bg-gradient-to-br from-primary/15 via-card to-card p-6">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="inline-flex items-center gap-2 rounded-full bg-primary/15 px-3 py-1 text-xs font-semibold text-primary">
-              <Sparkles className="h-3.5 w-3.5" />
-              Next Payout
+      {/* Next Payout */}
+      {nextPayout && (
+        <section className="mt-6 overflow-hidden rounded-2xl border border-primary/30 bg-gradient-to-br from-primary/15 via-card to-card p-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="inline-flex items-center gap-2 rounded-full bg-primary/15 px-3 py-1 text-xs font-semibold text-primary">
+                <Sparkles className="h-3.5 w-3.5" />
+                Next Payout
+              </div>
+              <p className="mt-3 text-sm text-muted-foreground">
+                {user && nextPayout.recipientId === user.id ? (
+                  <>
+                    You are the designated recipient for{" "}
+                    <span className="font-semibold text-foreground">{nextPayout.committeeName}</span>
+                  </>
+                ) : (
+                  <>
+                    Next scheduled payout in{" "}
+                    <span className="font-semibold text-foreground">{nextPayout.committeeName}</span>
+                  </>
+                )}
+              </p>
+              <h3 className="tabular mt-1 text-3xl font-bold sm:text-4xl">
+                {formatPKR(nextPayout.amount)}
+              </h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Cycle #{nextPayout.cycleNumber} · Recorded{" "}
+                {new Date(nextPayout.expectedDate).toLocaleDateString("en-PK", {
+                  day: "numeric",
+                  month: "long",
+                  year: "numeric",
+                })}
+              </p>
             </div>
-            <p className="mt-3 text-sm text-muted-foreground">
-              You're receiving from <span className="font-semibold text-foreground">{nextPayoutCommittee?.name ?? "Your committee"}</span>
-            </p>
-            <h3 className="tabular mt-1 text-3xl font-bold sm:text-4xl">
-              {formatPKR(nextPayoutAmount)}
-            </h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Cycle #{nextPayout.cycleNumber} · Expected{" "}
-              {new Date(nextPayoutDate).toLocaleDateString("en-PK", {
-                day: "numeric",
-                month: "long",
-                year: "numeric",
-              })}
-            </p>
+            <Button
+              variant="outline"
+              className="border-primary/40 bg-card/40"
+              onClick={() =>
+                navigate({
+                  to: "/committees/$committeeId",
+                  params: { committeeId: nextPayout.committeeId },
+                })
+              }
+            >
+              View Committee
+              <ArrowRight className="h-4 w-4" />
+            </Button>
           </div>
-          <Button
-            variant="outline"
-            className="border-primary/40 bg-card/40"
-            onClick={() => navigate({ to: "/committees/$committeeId", params: { committeeId: nextPayout.committeeId } })}
-          >
-            View Committee
-            <ArrowRight className="h-4 w-4" />
-          </Button>
-        </div>
-      </section>
-      ) : null}
+        </section>
+      )}
 
       {/* Active Kametis */}
       <section className="mt-10">
@@ -352,10 +363,10 @@ function DashboardPage() {
           </div>
         </div>
 
-        {loading ? (
-          <Card className="mt-5 border-dashed bg-card/40">
-            <CardContent className="px-6 py-10 text-center text-sm text-muted-foreground">Loading committees...</CardContent>
-          </Card>
+        {loadingData ? (
+          <div className="mt-5 flex items-center justify-center py-16">
+            <Loader2 className="h-6 w-6 animate-spin text-primary" />
+          </div>
         ) : committees.length === 0 ? (
           <EmptyState />
         ) : (
@@ -374,7 +385,8 @@ function DashboardPage() {
                     <div>
                       <h3 className="font-semibold leading-tight">{c.name}</h3>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        Total pool · <span className="tabular font-semibold text-foreground">{formatPKR(totalPool)}</span>
+                        Total pool ·{" "}
+                        <span className="tabular font-semibold text-foreground">{formatPKR(totalPool)}</span>
                       </p>
                     </div>
                     <span className="rounded-full border border-border/60 bg-secondary/60 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -421,6 +433,117 @@ function DashboardPage() {
   );
 }
 
+function JoinDialog({ onJoined }: { onJoined: () => void }) {
+  const { user } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [validating, setValidating] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [preview, setPreview] = useState<{ id: string; name: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setCode("");
+      setPreview(null);
+      setError(null);
+    }
+  }, [open]);
+
+  const handleValidate = async () => {
+    if (code.trim().length < 5) {
+      setError("Code must be at least 5 characters");
+      return;
+    }
+    setValidating(true);
+    setError(null);
+    try {
+      const res = await getCommitteeByInvite(code.trim());
+      const c = res.data;
+      setPreview({ id: c.id, name: c.name });
+      toast.success("Invite valid", { description: c.name });
+    } catch {
+      setError("Invalid or expired invite code");
+    } finally {
+      setValidating(false);
+    }
+  };
+
+  const handleJoin = async () => {
+    if (!preview || !user) return;
+    setSubmitting(true);
+    try {
+      await joinCommittee(preview.id, { userId: user.id, inviteCode: code.trim() });
+      toast.success("Joined Kameti", { description: `Welcome to ${preview.name}` });
+      setOpen(false);
+      onJoined();
+    } catch {
+      // global toast
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="lg" variant="outline" className="h-14 border-border/80 bg-card/40 font-semibold backdrop-blur">
+          <KeyRound className="h-5 w-5" />
+          Join via Invite Code
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Join a Kameti</DialogTitle>
+          <DialogDescription>Enter the invite code shared by the committee admin.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-2">
+            <Label htmlFor="invite">Invite Code</Label>
+            <div className="flex gap-2">
+              <Input
+                id="invite"
+                placeholder="KMT-XXX-0000"
+                value={code}
+                onChange={(e) => {
+                  setCode(e.target.value);
+                  setPreview(null);
+                  setError(null);
+                }}
+                className="tabular uppercase"
+                maxLength={20}
+              />
+              <Button type="button" variant="outline" disabled={validating || !code} onClick={handleValidate}>
+                {validating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Check"}
+              </Button>
+            </div>
+            {error && <p className="text-xs text-destructive">{error}</p>}
+          </div>
+
+          {preview && (
+            <div className="rounded-xl border border-primary/30 bg-primary/5 p-4">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-primary">Verified Invite</p>
+              <p className="mt-1 text-sm font-bold">{preview.name}</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                After joining you will see the full committee details and contribution amount.
+              </p>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button onClick={handleJoin} disabled={!preview || submitting}>
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Join Kameti
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function EmptyState() {
   return (
     <Card className="mt-5 border-dashed bg-card/40">
@@ -433,8 +556,8 @@ function EmptyState() {
         </div>
         <h3 className="mt-6 text-lg font-bold">Start your first Kameti</h3>
         <p className="mt-2 max-w-sm text-sm text-muted-foreground">
-          Pool savings with people you trust. Set the amount, frequency and members — Kameti
-          handles the rest with secure, transparent payouts.
+          Pool savings with people you trust. Set the amount, frequency and members — Kameti handles the
+          rest with secure, transparent payouts.
         </p>
         <Button asChild size="lg" className="mt-6 shadow-emerald">
           <Link to="/create">

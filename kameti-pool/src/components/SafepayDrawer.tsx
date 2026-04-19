@@ -17,9 +17,10 @@ import {
 } from "@/components/ui/drawer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { formatPKR } from "@/lib/mock-data";
+import { formatPKR } from "@/lib/format";
+import { payContribution } from "@/lib/api";
 
-type Step = "select" | "processing" | "success";
+type Step = "select" | "processing" | "success" | "error";
 
 interface Card {
   id: string;
@@ -49,6 +50,7 @@ const CARDS: Card[] = [
 interface Props {
   open: boolean;
   onOpenChange: (v: boolean) => void;
+  contributionId: string;
   amount: number;
   committeeName: string;
   cycleNumber: number;
@@ -58,6 +60,7 @@ interface Props {
 export function SafepayDrawer({
   open,
   onOpenChange,
+  contributionId,
   amount,
   committeeName,
   cycleNumber,
@@ -76,15 +79,23 @@ export function SafepayDrawer({
   const card = CARDS.find((c) => c.id === cardId)!;
   const platformFee = Math.round(amount * 0.01);
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     setStep("processing");
-    setTimeout(() => {
+    try {
+      // hold for the dramatic ~1.8s pause then call API
+      const minDelay = new Promise((r) => setTimeout(r, 1800));
+      await Promise.all([minDelay, payContribution(contributionId)]);
       setStep("success");
       toast.success(`Payment verified for Cycle ${cycleNumber}`, {
         description: `${formatPKR(amount)} secured via Safepay · ${card.brand} ••${card.last4}`,
       });
       onComplete?.();
-    }, 1800);
+    } catch {
+      setStep("error");
+      toast.error("Payment could not be completed", {
+        description: "Check your connection and try again, or use another method.",
+      });
+    }
   };
 
   return (
@@ -105,7 +116,6 @@ export function SafepayDrawer({
         </DrawerHeader>
 
         <div className="px-4 pb-6">
-          {/* Amount summary card */}
           <div className="rounded-2xl border border-border/60 bg-card/60 p-4">
             <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
               Paying contribution
@@ -144,9 +154,7 @@ export function SafepayDrawer({
                         {c.brand}
                       </div>
                       <div className="flex-1">
-                        <p className="tabular text-sm font-semibold">
-                          •••• •••• •••• {c.last4}
-                        </p>
+                        <p className="tabular text-sm font-semibold">•••• •••• •••• {c.last4}</p>
                         <p className="text-[11px] text-muted-foreground">Exp {c.expiry}</p>
                       </div>
                       <div
@@ -160,11 +168,7 @@ export function SafepayDrawer({
                 })}
               </div>
 
-              <Button
-                onClick={handleConfirm}
-                size="lg"
-                className="mt-5 h-12 w-full shadow-emerald font-semibold"
-              >
+              <Button onClick={handleConfirm} size="lg" className="mt-5 h-12 w-full shadow-emerald font-semibold">
                 <Lock className="h-4 w-4" />
                 Confirm Payment · {formatPKR(amount)}
               </Button>
@@ -191,6 +195,19 @@ export function SafepayDrawer({
             </div>
           )}
 
+          {step === "error" && (
+            <div className="mt-6 flex flex-col items-center py-6">
+              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-destructive/15 text-destructive">
+                <Lock className="h-6 w-6" />
+              </div>
+              <p className="mt-4 text-base font-bold">Payment failed</p>
+              <p className="mt-1 text-xs text-muted-foreground">Please try again or use another card.</p>
+              <Button onClick={() => setStep("select")} className="mt-4 w-full">
+                Try again
+              </Button>
+            </div>
+          )}
+
           {step === "success" && (
             <div className="mt-6 animate-fade-in">
               <div className="flex flex-col items-center py-6">
@@ -201,9 +218,7 @@ export function SafepayDrawer({
                   </div>
                 </div>
                 <p className="mt-5 text-lg font-bold">Payment Successful</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Your contribution is locked in the vault.
-                </p>
+                <p className="mt-1 text-xs text-muted-foreground">Your contribution is locked in the vault.</p>
               </div>
 
               <div className="space-y-2 rounded-xl border border-border/60 bg-card/60 p-4">
@@ -211,11 +226,7 @@ export function SafepayDrawer({
                 <Row label="Method" value={`${card.brand} ••${card.last4}`} />
                 <Row label="Committee" value={committeeName} />
                 <Row label="Cycle" value={`#${cycleNumber}`} />
-                <Row
-                  label="Reference"
-                  value={`SP-${Date.now().toString().slice(-8)}`}
-                  mono
-                />
+                <Row label="Reference" value={`SP-${Date.now().toString().slice(-8)}`} mono />
                 <div className="my-1 border-t border-dashed border-border/60" />
                 <div className="flex items-center gap-1.5 text-[11px] font-semibold text-primary">
                   <Sparkles className="h-3 w-3" />
@@ -223,11 +234,7 @@ export function SafepayDrawer({
                 </div>
               </div>
 
-              <Button
-                onClick={() => onOpenChange(false)}
-                size="lg"
-                className="mt-4 h-12 w-full"
-              >
+              <Button onClick={() => onOpenChange(false)} size="lg" className="mt-4 h-12 w-full">
                 Done
               </Button>
             </div>
