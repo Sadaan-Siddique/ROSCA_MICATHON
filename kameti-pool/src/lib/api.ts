@@ -27,10 +27,13 @@ export type {
 } from "@/lib/api-types";
 export { parseDecimal } from "@/lib/api-types";
 
+/** When `VITE_API_URL` is unset, we use the backend origin only; `/api` is appended below to match `app.use("/api", router)`. */
+const DEFAULT_DEV_API_ORIGIN = "http://localhost:4000";
+
 const rawBase =
   typeof import.meta.env.VITE_API_URL === "string" && import.meta.env.VITE_API_URL.trim().length > 0
     ? import.meta.env.VITE_API_URL.trim()
-    : "http://localhost:4000/api";
+    : DEFAULT_DEV_API_ORIGIN;
 
 /** Backend mounts the router at `/api` (see `backend/src/app.ts`). Bare origins get `/api` appended. */
 function normalizeApiBaseUrl(input: string): string {
@@ -110,7 +113,7 @@ api.interceptors.response.use(
       const backendMsg = extractBackendErrorMessage(data);
       const networkHint =
         !error.response && typeof error.message === "string" && error.message === "Network Error"
-          ? `Cannot reach the API at ${BASE_URL}. Is the backend running, CORS allowed, and VITE_API_URL set (e.g. http://localhost:4000/api)?`
+          ? `Cannot reach the API at ${BASE_URL}. Is the backend running on port 4000? (Default base is ${DEFAULT_DEV_API_ORIGIN} + /api; override with VITE_API_URL.)`
           : null;
       const description = backendMsg ?? networkHint ?? safeClientMessage(status);
       toast.error("Request failed", { description });

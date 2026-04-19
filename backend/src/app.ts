@@ -8,19 +8,14 @@ import { env } from "./config/env.js";
 
 export const app = express();
 
-const allowedOrigins = env.FRONTEND_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean);
-
+/** Hackathon demo: allow any browser origin so Vite (5173, 5174, …) never breaks CORS. */
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-        return;
-      }
-      callback(new Error("Origin not allowed by CORS"));
-    },
-    credentials: false
-  })
+    origin: "*",
+    credentials: false,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
 );
 app.use(helmet());
 app.use(
