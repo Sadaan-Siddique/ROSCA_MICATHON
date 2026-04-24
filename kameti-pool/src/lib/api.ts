@@ -27,13 +27,8 @@ export type {
 } from "@/lib/api-types";
 export { parseDecimal } from "@/lib/api-types";
 
-/** When `VITE_API_URL` is unset, we use the backend origin only; `/api` is appended below to match `app.use("/api", router)`. */
-const DEFAULT_DEV_API_ORIGIN = "http://localhost:4000";
-
 const rawBase =
-  typeof import.meta.env.VITE_API_URL === "string" && import.meta.env.VITE_API_URL.trim().length > 0
-    ? import.meta.env.VITE_API_URL.trim()
-    : DEFAULT_DEV_API_ORIGIN;
+  typeof import.meta.env.VITE_API_URL === "string" ? import.meta.env.VITE_API_URL.trim() : "";
 
 /** Backend mounts the router at `/api` (see `backend/src/app.ts`). Bare origins get `/api` appended. */
 function normalizeApiBaseUrl(input: string): string {
@@ -48,7 +43,7 @@ function normalizeApiBaseUrl(input: string): string {
   return s.replace(/\/+$/, "");
 }
 
-const BASE_URL = normalizeApiBaseUrl(rawBase);
+const BASE_URL = normalizeApiBaseUrl(rawBase || "https://rosca-micathon.onrender.com/api");
 
 function safeClientMessage(status?: number): string {
   if (status === 400) return "Please check your input and try again.";
@@ -113,7 +108,7 @@ api.interceptors.response.use(
       const backendMsg = extractBackendErrorMessage(data);
       const networkHint =
         !error.response && typeof error.message === "string" && error.message === "Network Error"
-          ? `Cannot reach the API at ${BASE_URL}. Is the backend running on port 4000? (Default base is ${DEFAULT_DEV_API_ORIGIN} + /api; override with VITE_API_URL.)`
+          ? `Cannot reach the API at ${BASE_URL}. Check VITE_API_URL and backend availability.`
           : null;
       const description = backendMsg ?? networkHint ?? safeClientMessage(status);
       toast.error("Request failed", { description });

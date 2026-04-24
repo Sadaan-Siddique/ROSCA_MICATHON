@@ -1,0 +1,8 @@
+{
+  "name": "rosca",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "db:studio": "npm run prisma:studio --prefix backend"
+  }
+}
