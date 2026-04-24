@@ -1,130 +1,129 @@
-# ROSCA MVP (Pakistan Committee App)
+# Khata — Digital Kameti / ROSCA
 
-Mobile-first MVP for a ROSCA/committee workflow using:
-- Backend: Express + Prisma + PostgreSQL
-- Frontend: React + Vite + TypeScript
-- Auth: OTP mock
+**Khata** is a full-stack web app that digitizes the traditional *kameti* (rotating savings and credit association) workflow: creating committees, tracking contributions, and managing fair payouts—without the spreadsheets, group chats, and manual errors that make informal ROSCAs hard to run at scale.
 
-## Project structure
+## Why it exists
 
-```txt
+Committees (*BCs / kametis*) are still coordinated manually: someone tracks who paid, who is due, and who receives the pot next. **Khata** gives admins and members a clear dashboard, mock OTP sign-in for demos, and a structured data model (cycles, contributions, payouts) so the group’s money story stays transparent.
+
+## Live demo
+
+| Layer    | URL |
+|----------|-----|
+| Frontend | [https://pakkameti.netlify.app](https://pakkameti.netlify.app) |
+| Backend  | [https://rosca-micathon.onrender.com](https://rosca-micathon.onrender.com) |
+
+The API is served under `/api` (e.g. [`/api/health`](https://rosca-micathon.onrender.com/api/health) on the live backend).
+
+## Tech stack
+
+- **Frontend:** React 19, Vite, TypeScript, TanStack Router, Tailwind CSS  
+- **Backend:** Node.js, Express 5, Zod  
+- **Data:** PostgreSQL, Prisma ORM  
+
+## Repository layout
+
+```text
 rosca/
-  backend/
-    prisma/
-      schema.prisma
-      seed.ts
-    src/
-      config/env.ts
-      lib/prisma.ts
-      middlewares/errorHandler.ts
-      routes/index.ts
-      services/notificationService.ts
-      app.ts
-      server.ts
-  frontend/
-    src/
-      api/client.ts
-      components/Layout.tsx
-      pages/
-        DashboardPage.tsx
-        CreateCommitteePage.tsx
-        CommitteeDetailPage.tsx
-      types/index.ts
-      App.tsx
-      main.tsx
-      index.css
+  backend/      # Express API + Prisma
+  kameti-pool/  # Vite + React client
 ```
 
-## 1) Backend setup
+## Local setup
 
-1. Go to backend:
-   - `cd backend`
-2. Create env file:
-   - `cp .env.example .env`
-3. Add your PostgreSQL connection in `.env`:
-   - `DATABASE_URL="postgresql://postgres:postgres@localhost:5432/rosca_mvp?schema=public"`
-4. Run migrations and generate Prisma client:
-   - `npm run prisma:migrate -- --name init`
-   - `npm run prisma:generate`
-5. Seed sample data:
-   - `npm run prisma:seed`
-6. Start backend:
-   - `npm run dev`
+### Prerequisites
 
-Backend runs on `http://localhost:4000`.
+- Node.js 20+ and npm  
+- PostgreSQL 14+ (local or Docker)  
+- A Unix-like shell; on **Arch Linux**, the Postgres service is often `postgresql` (see troubleshooting below)  
 
-## 2) Frontend setup
-
-1. Go to frontend:
-   - `cd frontend`
-2. Create env file:
-   - `cp .env.example .env`
-3. (Optional) set `VITE_USER_ID` to a seeded user id
-4. Start frontend:
-   - `npm run dev`
-
-Frontend runs on `http://localhost:5173`.
-
-## 3) API examples
-
-### Mock OTP signup/login
+### 1. Backend
 
 ```bash
-curl -X POST http://localhost:4000/api/auth/request-otp \
-  -H "Content-Type: application/json" \
-  -d '{"phone":"+923001111111"}'
+cd backend
+cp .env.example .env
+```
+
+Edit `backend/.env` and set a valid `DATABASE_URL` and `PORT` (e.g. `4000`). For a default local database named `kameti_db` with user `postgres` and password `postgres`:
+
+```env
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/kameti_db?schema=public"
+PORT=4000
+```
+
+Sync the schema to your database and (optionally) seed:
+
+```bash
+npx prisma db push
+npm run prisma:seed   # optional
+npm run dev
+```
+
+The API base URL is `http://localhost:4000` and routes are mounted at **`/api`**.
+
+### 2. Frontend
+
+```bash
+cd kameti-pool
+cp .env.example .env
+```
+
+Set the API base (bare origin is fine—the client normalizes to `/api`):
+
+```env
+VITE_API_URL=http://localhost:4000
 ```
 
 ```bash
-curl -X POST http://localhost:4000/api/auth/verify-otp \
-  -H "Content-Type: application/json" \
-  -d '{"phone":"+923001111111","otp":"1234","name":"Ali Khan"}'
+npm install
+npm run dev
 ```
 
-### Create committee
+Open the URL Vite prints (usually `http://localhost:5173`).
 
-```bash
-curl -X POST http://localhost:4000/api/committees \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name":"Office Committee",
-    "contributionAmount":5000,
-    "cycleLength":5,
-    "frequency":"MONTHLY",
-    "adminId":"<USER_ID>",
-    "startDate":"2026-04-20T00:00:00.000Z",
-    "payoutType":"FIXED"
-  }'
-```
+## Arch Linux: Postgres not running or wrong password
 
-### Join committee
+If `npx prisma db push` fails with connection or authentication errors:
 
-```bash
-curl -X POST http://localhost:4000/api/committees/<COMMITTEE_ID>/join \
-  -H "Content-Type: application/json" \
-  -d '{"userId":"<USER_ID>","inviteCode":"<INVITE_CODE>"}'
-```
+1. Start PostgreSQL (often requires `sudo`):
 
-### Generate contributions for cycle
+   ```bash
+   sudo systemctl start postgresql
+   sudo systemctl enable postgresql   # optional, start on boot
+   ```
 
-```bash
-curl -X POST http://localhost:4000/api/committees/<COMMITTEE_ID>/cycles/1/contributions/generate
-```
+2. Set the `postgres` user password and create the database (adjust if you use a different superuser):
 
-### Mark contribution paid
+   ```bash
+   sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'postgres';"
+   sudo -u postgres createdb kameti_db
+   ```
 
-```bash
-curl -X PATCH http://localhost:4000/api/contributions/<CONTRIBUTION_ID>/pay
-```
+3. Retry from `backend/`:
 
-### Assign payout for cycle
+   ```bash
+   npx prisma db push
+   ```
 
-```bash
-curl -X POST http://localhost:4000/api/committees/<COMMITTEE_ID>/cycles/1/payouts/assign
-```
+## Environment variables (summary)
 
-### Dashboard
+| Location | Variable | Purpose |
+|----------|----------|---------|
+| `backend/.env` | `DATABASE_URL` | Prisma / Postgres connection string |
+| `backend/.env` | `PORT` | HTTP port for the API |
+| `kameti-pool/.env` | `VITE_API_URL` | API origin for the Vite app (e.g. `http://localhost:4000` or production base URL) |
 
-```bash
-curl http://localhost:4000/api/dashboard/<USER_ID>
-```
+**Note:** Do not commit real `.env` files; they are listed in `.gitignore`.
+
+## Development scripts (quick reference)
+
+| Where | Command | Description |
+|-------|---------|-------------|
+| `backend` | `npm run dev` | API with hot reload |
+| `backend` | `npx prisma studio` | Browse DB in the browser (from `backend` or use repo `npm run db:studio` if configured) |
+| `kameti-pool` | `npm run dev` | Vite dev server |
+| `kameti-pool` | `npm run build` | Production static build for Netlify |
+
+## License
+
+Project submitted as a hackathon / educational MVP; adjust licensing as needed for your team.
