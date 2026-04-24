@@ -1,9 +1,10 @@
-// TanStack Start needs this wrapper; plain vite + react() expects index.html + src/main.tsx.
-import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
+import tailwindcss from "@tailwindcss/vite";
+import tsconfigPaths from "vite-tsconfig-paths";
 
 export default defineConfig({
-  vite: {
-    // Use "/<repo-name>/" here when building for GitHub Pages under a subpath.
-    base: "/",
-  },
+  base: "/",
+  plugins: [tanstackRouter({ target: "react" }), react(), tailwindcss(), tsconfigPaths()],
 });
